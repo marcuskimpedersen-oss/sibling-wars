@@ -530,19 +530,24 @@ export class EnemyAI {
     // Scale up sprite
     unit.sprite.setScale(1.4);
     // Red crown label above the unit
-    const crown = (this.scene as any).add.text(
+    const crown = this.scene.add.text(
       unit.sprite.x, unit.sprite.y - 38, '♛',
       { fontSize: '14px', color: '#ff2222', stroke: '#000', strokeThickness: 2 }
     ).setOrigin(0.5).setDepth(18);
     // Track crown in scene so it follows the unit — store on unit via custom field
     (unit as any)._eliteCrown = crown;
     (unit as any)._isElite = true;
-    // Move the crown each frame by hooking into the unit's sprite update
-    this.scene.events.on('update', () => {
-      if (!unit.isAlive()) { crown.destroy(); return; }
+    // Move the crown each frame; remove listener when the unit dies to avoid leak.
+    const crownUpdater = () => {
+      if (!unit.isAlive()) {
+        crown.destroy();
+        this.scene.events.off('update', crownUpdater);
+        return;
+      }
       crown.setPosition(unit.sprite.x, unit.sprite.y - 38);
       crown.setVisible(unit.fogVisible);
-    });
+    };
+    this.scene.events.on('update', crownUpdater);
     // Path toward player base immediately
     const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
     const tgt = APPROACH_POINTS[this.waveCount % APPROACH_POINTS.length];
