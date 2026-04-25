@@ -3767,6 +3767,7 @@ export class GameScene extends Phaser.Scene {
 
   private endGame(won: boolean): void {
     this.gameOver = true;
+    this.enemyAI.destroy();
 
     // Save replay event log to localStorage (only for real games, not already-replaying)
     if (!this._replayMode && this._replayEventLog.length > 0) {

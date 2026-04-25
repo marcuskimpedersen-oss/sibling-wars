@@ -62,6 +62,17 @@ export class EnemyAI {
   private _enabled = true;
   setEnabled(v: boolean): void { this._enabled = v; }
 
+  /** Tracks all active crownUpdater listeners so destroy() can remove them. */
+  private _crownUpdaters: Array<() => void> = [];
+
+  /** Call on game-over to remove all pending crown listeners and destroy crown objects. */
+  destroy(): void {
+    for (const fn of this._crownUpdaters) {
+      this.scene.events.off('update', fn);
+    }
+    this._crownUpdaters = [];
+  }
+
   private spawnTimer = 0;
   private orderTimer = 3000;
   private raidTimer  = 42000; // first raid after 42 s
@@ -534,19 +545,23 @@ export class EnemyAI {
       unit.sprite.x, unit.sprite.y - 38, '♛',
       { fontSize: '14px', color: '#ff2222', stroke: '#000', strokeThickness: 2 }
     ).setOrigin(0.5).setDepth(18);
-    // Track crown in scene so it follows the unit — store on unit via custom field
-    (unit as any)._eliteCrown = crown;
-    (unit as any)._isElite = true;
-    // Move the crown each frame; remove listener when the unit dies to avoid leak.
+    // Move the crown each frame; remove listener when the unit dies or on AI destroy.
     const crownUpdater = () => {
-      if (!unit.isAlive()) {
-        crown.destroy();
+      if (!crown.active) {
         this.scene.events.off('update', crownUpdater);
+        this._crownUpdaters = this._crownUpdaters.filter(fn => fn !== crownUpdater);
+        return;
+      }
+      if (!unit.isAlive()) {
+        this.scene.events.off('update', crownUpdater);
+        this._crownUpdaters = this._crownUpdaters.filter(fn => fn !== crownUpdater);
+        crown.destroy();
         return;
       }
       crown.setPosition(unit.sprite.x, unit.sprite.y - 38);
       crown.setVisible(unit.fogVisible);
     };
+    this._crownUpdaters.push(crownUpdater);
     this.scene.events.on('update', crownUpdater);
     // Path toward player base immediately
     const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
