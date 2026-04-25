@@ -39,3 +39,13 @@ Key routing rules:
 - Review what gstack has learned → invoke /learn
 - Tune question sensitivity → invoke /plan-tune
 - Code quality dashboard → invoke /health
+
+## Testing
+
+- Run: `npm test` (vitest, see TESTING.md)
+- Test directory: `tests/`
+- When writing new functions, write a corresponding test
+- When fixing a bug, write a regression test in `tests/`
+- When adding error handling, write a test that triggers the error
+- When adding a conditional (if/else), write tests for both paths
+- Never commit code that makes existing tests fail
