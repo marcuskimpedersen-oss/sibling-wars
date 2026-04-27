@@ -62,13 +62,17 @@ export class EnemyAI {
   private _enabled = true;
   setEnabled(v: boolean): void { this._enabled = v; }
 
-  /** Tracks all active crownUpdater listeners so destroy() can remove them. */
-  private _crownUpdaters: Array<() => void> = [];
+  private static readonly PHASER_UPDATE = 'update' as const;
+  private static readonly CROWN_Y_OFFSET = 38;
 
-  /** Call on game-over to remove all pending crown listeners and destroy crown objects. */
+  /** Tracks active crown updaters so destroy() can clean up both the listener and the Text object. */
+  private _crownUpdaters: Array<{ fn: () => void; crown: Phaser.GameObjects.Text }> = [];
+
+  /** Call on game-over to remove all pending crown listeners and destroy any surviving crown sprites. */
   destroy(): void {
-    for (const fn of this._crownUpdaters) {
-      this.scene.events.off('update', fn);
+    for (const { fn, crown } of this._crownUpdaters) {
+      this.scene.events.off(EnemyAI.PHASER_UPDATE, fn);
+      if (crown.active) crown.destroy();
     }
     this._crownUpdaters = [];
   }
@@ -542,27 +546,30 @@ export class EnemyAI {
     unit.sprite.setScale(1.4);
     // Red crown label above the unit
     const crown = this.scene.add.text(
-      unit.sprite.x, unit.sprite.y - 38, '♛',
+      unit.sprite.x, unit.sprite.y - EnemyAI.CROWN_Y_OFFSET, '♛',
       { fontSize: '14px', color: '#ff2222', stroke: '#000', strokeThickness: 2 }
     ).setOrigin(0.5).setDepth(18);
-    // Move the crown each frame; remove listener when the unit dies or on AI destroy.
+    // Move the crown each frame; remove listener + sprite when the unit dies or on AI destroy.
     const crownUpdater = () => {
+      const removeSelf = () => {
+        this.scene.events.off(EnemyAI.PHASER_UPDATE, crownUpdater);
+        this._crownUpdaters = this._crownUpdaters.filter(entry => entry.fn !== crownUpdater);
+      };
       if (!crown.active) {
-        this.scene.events.off('update', crownUpdater);
-        this._crownUpdaters = this._crownUpdaters.filter(fn => fn !== crownUpdater);
+        // Crown was already destroyed externally (e.g. scene shutdown); just deregister.
+        removeSelf();
         return;
       }
       if (!unit.isAlive()) {
-        this.scene.events.off('update', crownUpdater);
-        this._crownUpdaters = this._crownUpdaters.filter(fn => fn !== crownUpdater);
+        removeSelf();
         crown.destroy();
         return;
       }
-      crown.setPosition(unit.sprite.x, unit.sprite.y - 38);
+      crown.setPosition(unit.sprite.x, unit.sprite.y - EnemyAI.CROWN_Y_OFFSET);
       crown.setVisible(unit.fogVisible);
     };
-    this._crownUpdaters.push(crownUpdater);
-    this.scene.events.on('update', crownUpdater);
+    this._crownUpdaters.push({ fn: crownUpdater, crown });
+    this.scene.events.on(EnemyAI.PHASER_UPDATE, crownUpdater);
     // Path toward player base immediately
     const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
     const tgt = APPROACH_POINTS[this.waveCount % APPROACH_POINTS.length];

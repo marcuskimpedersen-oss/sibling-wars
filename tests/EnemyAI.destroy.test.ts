@@ -9,7 +9,7 @@
 // The fix: named crownUpdater functions tracked in _crownUpdaters[], removed
 // in EnemyAI.destroy() which GameScene.endGame() now calls.
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 // ── Phaser mock ───────────────────────────────────────────────────────────────
 // EnemyAI only needs scene.events.{on,off} and scene.time.addEvent.
@@ -64,15 +64,16 @@ function makeAI(scene = makeScene()) {
   return new EnemyAI(scene, {} as any, {} as any, {} as any);
 }
 
-// Push synthetic listeners the same way the real crownUpdater path does.
-function injectCrownUpdaters(ai: EnemyAI, count: number): Array<() => void> {
-  const fns: Array<() => void> = [];
+// Push synthetic {fn, crown} entries the same way the real crownUpdater path does.
+function injectCrownUpdaters(ai: EnemyAI, count: number): Array<{ fn: ReturnType<typeof vi.fn>; crown: { active: boolean; destroy: ReturnType<typeof vi.fn> } }> {
+  const entries: Array<{ fn: ReturnType<typeof vi.fn>; crown: { active: boolean; destroy: ReturnType<typeof vi.fn> } }> = [];
   for (let i = 0; i < count; i++) {
     const fn = vi.fn();
-    (ai as any)._crownUpdaters.push(fn);
-    fns.push(fn);
+    const crown = { active: true, destroy: vi.fn() };
+    (ai as any)._crownUpdaters.push({ fn, crown });
+    entries.push({ fn, crown });
   }
-  return fns;
+  return entries;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -81,12 +82,12 @@ describe('EnemyAI.destroy()', () => {
   it('calls scene.events.off for every tracked crownUpdater', () => {
     const scene = makeScene();
     const ai = makeAI(scene);
-    const fns = injectCrownUpdaters(ai, 3);
+    const entries = injectCrownUpdaters(ai, 3);
 
     ai.destroy();
 
     expect(scene.events.off).toHaveBeenCalledTimes(3);
-    for (const fn of fns) {
+    for (const { fn } of entries) {
       expect(scene.events.off).toHaveBeenCalledWith('update', fn);
     }
   });
@@ -97,7 +98,7 @@ describe('EnemyAI.destroy()', () => {
     injectCrownUpdaters(ai, 2);
 
     ai.destroy();
-    ai.destroy(); // second call must not re-invoke off()
+    ai.destroy(); // second call must not re-invoke off() or crown.destroy()
 
     expect(scene.events.off).toHaveBeenCalledTimes(2); // only the first call
     expect((ai as any)._crownUpdaters).toHaveLength(0);
@@ -109,6 +110,20 @@ describe('EnemyAI.destroy()', () => {
 
     expect(() => ai.destroy()).not.toThrow();
     expect(scene.events.off).not.toHaveBeenCalled();
+  });
+
+  it('calls crown.destroy() on still-active crown sprites at game-over', () => {
+    const scene = makeScene();
+    const ai = makeAI(scene);
+    const entries = injectCrownUpdaters(ai, 3);
+    // Simulate one crown already destroyed (e.g. unit died mid-game)
+    entries[1].crown.active = false;
+
+    ai.destroy();
+
+    expect(entries[0].crown.destroy).toHaveBeenCalledTimes(1);
+    expect(entries[1].crown.destroy).not.toHaveBeenCalled(); // already inactive
+    expect(entries[2].crown.destroy).toHaveBeenCalledTimes(1);
   });
 
   it('handles a large number of listeners without error', () => {
