@@ -31,6 +31,10 @@ const config: Phaser.Types.Core.GameConfig = {
 
 const game = new Phaser.Game(config);
 
+if (import.meta.env.DEV) {
+  (window as any).__PHASER_GAME = game;
+}
+
 window.addEventListener('resize', () => {
   game.scale.resize(window.innerWidth, window.innerHeight);
 });

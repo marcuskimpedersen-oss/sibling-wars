@@ -1603,6 +1603,27 @@ export class GameScene extends Phaser.Scene {
     this.input.keyboard!.on('keydown-G', () => {
       if (ctrlKey.isDown) this.setTestMode(!this.resources.infiniteResources);
     });
+
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line @typescript-eslint/no-this-alias
+      const scene = this;
+      (window as any).__SIBLING_WARS = {
+        get gold() { return scene.resources.getGold(); },
+        get gameOver() { return scene.gameOver; },
+        get waveCount() { return scene.enemyAI.waveCount; },
+        get playerUnitCount() {
+          return scene.unitManager.getLivingUnits().filter((u: any) => u.faction === 'player').length;
+        },
+        get enemyUnitCount() {
+          return scene.unitManager.getLivingUnits().filter((u: any) => u.faction === 'enemy').length;
+        },
+        get eliteGameTimerMs() { return (scene.enemyAI as any)._eliteGameTimerMs; },
+        set eliteGameTimerMs(ms: number) { (scene.enemyAI as any)._eliteGameTimerMs = ms; },
+        addGold(amount: number) { scene.resources.addGold(amount); },
+        triggerWave() { (scene.enemyAI as any).launchAssaultWave(5); },
+        endGame(won: boolean) { (scene as any).endGame(won); },
+      };
+    }
   }
 
   /**
