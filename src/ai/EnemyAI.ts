@@ -113,6 +113,8 @@ export class EnemyAI {
   private _adaptiveMeleeBoost = 0;
   /** True once the all-in push has been sent (resets when player becomes active). */
   private _allInSent = false;
+  /** True once the ranged-adaptation warning has been shown (shown once per game). */
+  private _adaptiveRangedWarnSent = false;
   /** Cooldown so gold raids don't spam (ms). */
   private _goldRaidCooldown = 0;
 
@@ -216,8 +218,8 @@ export class EnemyAI {
         if (placed.isDestroyed()) return;
         const unit = this.spawnEnemyAtTile(outpostTileX + 1, outpostTileY + 2);
         // Order it to attack toward the player base
-        const tx = Math.max(1, Math.min(48, BASE_TILE.x + Math.floor(Math.random() * 5) - 2));
-        const ty = Math.max(1, Math.min(38, BASE_TILE.y + Math.floor(Math.random() * 5) - 2));
+        const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, BASE_TILE.x + Math.floor(Math.random() * 5) - 2));
+        const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, BASE_TILE.y + Math.floor(Math.random() * 5) - 2));
         const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
         this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
           if (path && path.length > 0) unit.setPath(path);
@@ -375,8 +377,8 @@ export class EnemyAI {
       { x: -4, y: 0 }, { x: -4, y: -3 }, { x: -7, y: 0 },
     ];
     const off = offsets[Math.min(this.barrackCount - 1, offsets.length - 1)];
-    const tx = Math.max(1, Math.min(48, ENEMY_BASE_TILE.x + off.x));
-    const ty = Math.max(1, Math.min(38, ENEMY_BASE_TILE.y + off.y));
+    const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, ENEMY_BASE_TILE.x + off.x));
+    const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, ENEMY_BASE_TILE.y + off.y));
 
     // Use the existing Bulwark garrison def as a stand-in for the enemy barracks
     const barracksLikeDef = {
@@ -413,8 +415,8 @@ export class EnemyAI {
       const angle = (i / count) * Math.PI * 2;
       const ox = Math.round(Math.cos(angle) * ringRadius);
       const oy = Math.round(Math.sin(angle) * ringRadius);
-      const tx = Math.max(1, Math.min(48, ENEMY_BASE_TILE.x + ox));
-      const ty = Math.max(1, Math.min(38, ENEMY_BASE_TILE.y + oy));
+      const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, ENEMY_BASE_TILE.x + ox));
+      const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, ENEMY_BASE_TILE.y + oy));
 
       const base = RACE_COMBAT_STATS[this.race];
       const m = this.statMultiplier;
@@ -457,7 +459,9 @@ export class EnemyAI {
 
   private checkMilestones(): void {
     for (const m of this.milestones) {
-      const threshold = Math.max(1, Math.round(m.wave / this.milestoneAccel));
+      // Guard: milestoneAccel=0 would cause division-by-zero and silently disable all milestones.
+      const accel = this.milestoneAccel > 0 ? this.milestoneAccel : 1.0;
+      const threshold = Math.max(1, Math.round(m.wave / accel));
       if (!m.fired && this.waveCount >= threshold) {
         m.fired = true;
         m.action(this);
@@ -494,8 +498,8 @@ export class EnemyAI {
   private spawnEnemy() {
     const ox = Math.floor(Math.random() * 4) - 2;
     const oy = Math.floor(Math.random() * 4) - 2;
-    const tx = Math.max(1, Math.min(48, ENEMY_BASE_TILE.x + ox));
-    const ty = Math.max(1, Math.min(38, ENEMY_BASE_TILE.y + oy));
+    const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, ENEMY_BASE_TILE.x + ox));
+    const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, ENEMY_BASE_TILE.y + oy));
     const base = RACE_COMBAT_STATS[this.race];
     const m = this.statMultiplier;
 
@@ -530,8 +534,8 @@ export class EnemyAI {
   private spawnEliteEnemy(): void {
     const ox = Math.floor(Math.random() * 4) - 2;
     const oy = Math.floor(Math.random() * 4) - 2;
-    const tx = Math.max(1, Math.min(48, ENEMY_BASE_TILE.x + ox));
-    const ty = Math.max(1, Math.min(38, ENEMY_BASE_TILE.y + oy));
+    const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, ENEMY_BASE_TILE.x + ox));
+    const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, ENEMY_BASE_TILE.y + oy));
     const base = RACE_COMBAT_STATS[this.race];
     const m = this.statMultiplier;
     const eliteStats: CombatStats = {
@@ -604,8 +608,8 @@ export class EnemyAI {
       // Primary group → main vector
       for (let i = 0; i < primarySize; i++) {
         const unit = this.spawnEnemy();
-        const tx = Math.max(1, Math.min(48, vector.x + Math.floor(Math.random() * 3) - 1));
-        const ty = Math.max(1, Math.min(38, vector.y + Math.floor(Math.random() * 3) - 1));
+        const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, vector.x + Math.floor(Math.random() * 3) - 1));
+        const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 3) - 1));
         const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
         this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
           if (path && path.length > 0) unit.setPath(path);
@@ -619,13 +623,13 @@ export class EnemyAI {
       // Clockwise 90°: (dy, -dx) normalised then scaled 6 tiles
       const perpX = Math.round((mainDy / len) * 6);
       const perpY = Math.round((-mainDx / len) * 6);
-      const flankTX = Math.max(1, Math.min(48, vector.x + perpX));
-      const flankTY = Math.max(1, Math.min(38, vector.y + perpY));
+      const flankTX = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, vector.x + perpX));
+      const flankTY = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + perpY));
 
       for (let i = 0; i < flankSize; i++) {
         const unit = this.spawnEnemy();
-        const tx = Math.max(1, Math.min(48, flankTX + Math.floor(Math.random() * 3) - 1));
-        const ty = Math.max(1, Math.min(38, flankTY + Math.floor(Math.random() * 3) - 1));
+        const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, flankTX + Math.floor(Math.random() * 3) - 1));
+        const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, flankTY + Math.floor(Math.random() * 3) - 1));
         const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
         this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
           if (path && path.length > 0) unit.setPath(path);
@@ -647,8 +651,8 @@ export class EnemyAI {
     // Standard wave
     for (let i = 0; i < size; i++) {
       const unit = this.spawnEnemy();
-      const tx = Math.max(1, Math.min(48, vector.x + Math.floor(Math.random() * 3) - 1));
-      const ty = Math.max(1, Math.min(38, vector.y + Math.floor(Math.random() * 3) - 1));
+      const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, vector.x + Math.floor(Math.random() * 3) - 1));
+      const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 3) - 1));
       const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
       this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
         if (path && path.length > 0) unit.setPath(path);
@@ -675,8 +679,8 @@ export class EnemyAI {
     const raidSize = 2 + Math.floor(Math.random() * 2); // 2–3
     for (let i = 0; i < raidSize; i++) {
       const unit = this.spawnEnemy();
-      const tx = Math.max(1, Math.min(48, targetTileX + (i % 2)));
-      const ty = Math.max(1, Math.min(38, targetTileY + Math.floor(i / 2)));
+      const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, targetTileX + (i % 2)));
+      const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, targetTileY + Math.floor(i / 2)));
       const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
       this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
         if (path && path.length > 0) unit.setPath(path);
@@ -699,10 +703,9 @@ export class EnemyAI {
    * then re-engage after a short pause to bait the player forward.
    */
   private launchFeint(): void {
-    const retreatPoint = APPROACH_POINTS[Math.floor(Math.random() * APPROACH_POINTS.length)];
     // Retreat 200px worth of tiles (~6 tiles) back toward enemy base
-    const retreatTileX = Math.max(1, Math.min(48, ENEMY_BASE_TILE.x - 4 + Math.floor(Math.random() * 3)));
-    const retreatTileY = Math.max(1, Math.min(38, ENEMY_BASE_TILE.y - 4 + Math.floor(Math.random() * 3)));
+    const retreatTileX = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, ENEMY_BASE_TILE.x - 4 + Math.floor(Math.random() * 3)));
+    const retreatTileY = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, ENEMY_BASE_TILE.y - 4 + Math.floor(Math.random() * 3)));
 
     this.unitManager.getAllUnits()
       .filter(u => u.faction === 'enemy' && !u.isWorker && u.isAlive() && !u.isAttacking())
@@ -715,8 +718,6 @@ export class EnemyAI {
 
     // Re-engage after 2.5 seconds
     this.feintTimer = 2500;
-
-    void retreatPoint; // suppress unused warning
   }
 
   /**
@@ -728,8 +729,8 @@ export class EnemyAI {
     const raidSize = 3 + Math.floor(Math.random() * 3); // 3–5
     for (let i = 0; i < raidSize; i++) {
       const unit = this.spawnEnemy();
-      const tx = Math.max(1, Math.min(48, vector.x + Math.floor(Math.random() * 3) - 1));
-      const ty = Math.max(1, Math.min(38, vector.y + Math.floor(Math.random() * 3) - 1));
+      const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, vector.x + Math.floor(Math.random() * 3) - 1));
+      const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 3) - 1));
       const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
       this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
         if (path && path.length > 0) unit.setPath(path);
@@ -749,8 +750,9 @@ export class EnemyAI {
   // ── Adaptive strategy ────────────────────────────────────────────────────────
 
   private runAdaptiveStrategy(): void {
-    // 1. Player has many ranged units → boost the next wave with extra melee
-    if (this.playerRangedUnitCount > 5) {
+    // 1. Player has many ranged units → boost the next wave with extra melee (warn once)
+    if (this.playerRangedUnitCount > 5 && !this._adaptiveRangedWarnSent) {
+      this._adaptiveRangedWarnSent = true;
       this._adaptiveMeleeBoost = Math.max(this._adaptiveMeleeBoost, 3);
       const screenW = this.scene.scale.width;
       const warn = this.scene.add.text(screenW / 2, 36, '\u26a1 Enemy adapts to your ranged forces!', {
@@ -782,8 +784,8 @@ export class EnemyAI {
     const pushSize = Math.min(20, 8 + Math.floor(this.waveCount / 2));
     for (let i = 0; i < pushSize; i++) {
       const unit = this.spawnEnemy();
-      const tx = Math.max(1, Math.min(48, vector.x + Math.floor(Math.random() * 4) - 2));
-      const ty = Math.max(1, Math.min(38, vector.y + Math.floor(Math.random() * 4) - 2));
+      const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, vector.x + Math.floor(Math.random() * 4) - 2));
+      const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 4) - 2));
       const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
       this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
         if (path && path.length > 0) unit.setPath(path);
@@ -794,8 +796,8 @@ export class EnemyAI {
       .filter(u => u.faction === 'enemy' && u.isAlive() && !u.isAttacking())
       .forEach(u => {
         const { tileX, tileY } = u.getCurrentTile();
-        const tx = Math.max(1, Math.min(48, vector.x + Math.floor(Math.random() * 4) - 2));
-        const ty = Math.max(1, Math.min(38, vector.y + Math.floor(Math.random() * 4) - 2));
+        const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, vector.x + Math.floor(Math.random() * 4) - 2));
+        const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 4) - 2));
         this.pathfinder.findPath(tileX, tileY, tx, ty, (path) => {
           if (path && path.length > 0) u.setPath(path);
         });
@@ -840,8 +842,8 @@ export class EnemyAI {
       .forEach(u => {
         const { tileX, tileY } = u.getCurrentTile();
         const vector = APPROACH_POINTS[Math.floor(Math.random() * APPROACH_POINTS.length)];
-        const tx = Math.max(1, Math.min(48, vector.x + Math.floor(Math.random() * 5) - 2));
-        const ty = Math.max(1, Math.min(38, vector.y + Math.floor(Math.random() * 5) - 2));
+        const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, vector.x + Math.floor(Math.random() * 5) - 2));
+        const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 5) - 2));
         this.pathfinder.findPath(tileX, tileY, tx, ty, (path) => {
           if (path && path.length > 0) u.setPath(path);
         });
