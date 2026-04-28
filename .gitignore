@@ -3,3 +3,4 @@ dist/
 *.mjs
 .DS_Store
 .gstack/
+test-results/
