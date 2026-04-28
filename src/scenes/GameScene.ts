@@ -1863,7 +1863,11 @@ export class GameScene extends Phaser.Scene {
   /** Huw (Architects): selected worker walks to site, then builds for 5–10 seconds. */
   private beginHuwConstruction(def: import('@/buildings/definitions').BuildingDef, tx: number, ty: number): void {
     const worker = Array.from(this.unitManager.selectedUnits).find(u => u.isWorker && u.isAlive());
-    if (!worker) return;
+    if (!worker) {
+      const { x: hx, y: hy } = this.playerHQ?.getWorldCenter() ?? { x: 400, y: 300 };
+      this.spawnFloatingText(hx, hy - 30, 'Select a worker first!', '#ff8844');
+      return;
+    }
 
     // Spend gold up-front (same as normal placement)
     if (!this.resources.spendGold(def.goldCost)) return;
