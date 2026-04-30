@@ -2576,6 +2576,11 @@ export class GameScene extends Phaser.Scene {
     const { tileX, tileY } = worker.getCurrentTile();
     const nodeWorldX = node.tileX * TILE_SIZE + TILE_SIZE / 2;
     const nodeWorldY = node.tileY * TILE_SIZE + TILE_SIZE / 2;
+    // Re-check whether a mine building is still linked — the building may have been
+    // destroyed since the assignment was made, reverting to direct (2×) harvest time.
+    const hasLinked = this.buildingManager.getBuildings()
+      .some(b => b.faction === 'player' && !b.isDestroyed() && b.getLinkedNode() === node);
+    worker.directMining = !hasLinked;
     const harvestDur = worker.directMining
       ? worker.HARVEST_DURATION_MS * 2
       : worker.HARVEST_DURATION_MS;
