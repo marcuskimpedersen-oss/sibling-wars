@@ -2651,9 +2651,10 @@ export class GameScene extends Phaser.Scene {
           }
           // Pick up resources
           worker.carryAmount = node.harvest(worker.CARRY_CAPACITY);
-          // harvest() may fire node:depleted synchronously, which calls stopWorkerMining
-          // and resets miningState to 'idle'. Cast to string to defeat TS narrowing.
-          if ((worker.miningState as string) === 'idle') continue;
+          // harvest() may fire node:depleted synchronously, which transitions
+          // miningState to 'exiting_mine' (or 'idle' for other workers).
+          // Bail out of the carry path if state changed — the event handler takes over.
+          if ((worker.miningState as string) !== 'harvesting') continue;
           worker.carryType = node.type;
 
           // Helper: deposit resources and kick off the next trip.
