@@ -711,6 +711,14 @@ export class GameScene extends Phaser.Scene {
     this.events.on('input:speedDown',   () => this.stepGameSpeed(-1));
     this.events.on('input:speedReset',  () => this.setGameSpeed(1));
 
+    // Stop command: cancel mining for selected workers so they don't stay stuck
+    // in 'to_node' or 'to_hq' with stale miningAssignments entries.
+    this.events.on('input:stopUnits', () => {
+      this.unitManager.getSelectedWorkers().forEach(w => {
+        if (w.miningState !== 'idle') this.stopWorkerMining(w);
+      });
+    });
+
     // ── Phantom stealth (B key) ───────────────────────────────────────────────
     this.events.on('input:activateStealth', () => {
       this.unitManager.getSelectedPhantoms().forEach(p => {

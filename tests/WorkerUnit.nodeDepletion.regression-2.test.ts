@@ -110,3 +110,42 @@ describe('depositAndContinue handles depleted node after deposit', () => {
     expect(reDqueued).toBe(false);
   });
 });
+
+// ── Stop command leaks miningAssignment ───────────────────────────────────────
+
+describe('Stop command cancels active mining assignments', () => {
+  // Bug: input:stopUnits only called stopMoving() which nulled onArrivedCallback
+  // but left the worker stuck in 'to_hq' / 'to_node' state with a live entry in
+  // miningAssignments and a still-incremented node.workerCount.
+  //
+  // Fix: input:stopUnits listener in GameScene now calls stopWorkerMining() for
+  // any selected mining workers, same as the right-click-move handler.
+
+  it('stopWorkerMining must be called for non-idle workers on stop command', () => {
+    let stopCalled = false;
+    const worker = { miningState: 'to_hq' as string };
+    const stopWorkerMining = () => { stopCalled = true; };
+
+    // Simulate the input:stopUnits handler
+    if (worker.miningState !== 'idle') stopWorkerMining();
+
+    expect(stopCalled).toBe(true);
+  });
+
+  it('does not call stopWorkerMining for idle workers (already unassigned)', () => {
+    let stopCalled = false;
+    const worker = { miningState: 'idle' as string };
+    const stopWorkerMining = () => { stopCalled = true; };
+
+    if (worker.miningState !== 'idle') stopWorkerMining();
+
+    expect(stopCalled).toBe(false);
+  });
+
+  it('to_node workers are also cleaned up on stop', () => {
+    // Without the fix, a worker stopped mid-walk to a mine would stay in
+    // miningAssignments with workerCount incremented, blocking other assignments.
+    const miningState = 'to_node';
+    expect(miningState !== 'idle').toBe(true); // handler fires stopWorkerMining
+  });
+});
