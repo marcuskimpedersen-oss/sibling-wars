@@ -4535,17 +4535,18 @@ export class GameScene extends Phaser.Scene {
         const playerUnits = this.unitManager.getAllUnits()
           .filter(u => u.faction === 'player' && !u.isWorker && u.isAlive());
         if (playerUnits.length > 0) {
-          playerUnits.forEach(u => u.isSelected = true);
+          // selectedUnits Set (not isSelected flag) is what moveSelectedUnits reads.
+          playerUnits.forEach(u => this.unitManager.selectedUnits.add(u));
           this.unitManager.moveSelectedUnits(ev.tileX, ev.tileY);
-          playerUnits.forEach(u => u.isSelected = false);
+          playerUnits.forEach(u => this.unitManager.selectedUnits.delete(u));
         }
       } else if (ev.type === 'attack_move' && ev.tileX !== undefined && ev.tileY !== undefined) {
         const playerUnits = this.unitManager.getAllUnits()
           .filter(u => u.faction === 'player' && !u.isWorker && u.isAlive());
         if (playerUnits.length > 0) {
-          playerUnits.forEach(u => u.isSelected = true);
+          playerUnits.forEach(u => this.unitManager.selectedUnits.add(u));
           this.unitManager.attackMoveSelectedUnits(ev.tileX, ev.tileY);
-          playerUnits.forEach(u => u.isSelected = false);
+          playerUnits.forEach(u => this.unitManager.selectedUnits.delete(u));
         }
       } else if (ev.type === 'train' && ev.tileX !== undefined && ev.tileY !== undefined && ev.unitTypeId) {
         const stats = RACE_COMBAT_STATS[this.race];
