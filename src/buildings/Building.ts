@@ -234,6 +234,8 @@ export class Building {
     this.collectionTimer = 0;
   }
 
+  getLinkedNode(): ResourceNode | null { return this.linkedNode; }
+
   queueUnit(unitDef: ProducedUnitDef): void {
     this.productionQueue.push({ unitDef, elapsed: 0 });
     this.progressBar?.setVisible(true);

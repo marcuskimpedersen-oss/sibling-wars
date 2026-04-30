@@ -15,7 +15,7 @@ import { BuildingPlacement } from '@/buildings/BuildingPlacement';
 import { Building } from '@/buildings/Building';
 import { CombatSystem } from '@/combat/CombatSystem';
 import { EnemyAI } from '@/ai/EnemyAI';
-import { getBuildingsForRace, getRaceTint } from '@/buildings/definitions';
+import { getBuildingsForRace, getRaceTint, getBuildingDefById } from '@/buildings/definitions';
 import {
   Race, GOLD_POSITIONS, JUICE_POSITIONS, BASE_TILE, ENEMY_BASE_TILE, RACES,
   RACE_COMBAT_STATS, RESOURCE_SNAP_RADIUS_TILES, TILE_SIZE, UNIT_SPEED, Difficulty, WinCondition, SURVIVAL_DURATION_MS,
@@ -449,6 +449,7 @@ export class GameScene extends Phaser.Scene {
     this.buildingPlacement = new BuildingPlacement(this, this.buildingManager);
     this.unitManager = new UnitManager(this, this.resources, this.pathfinder);
     this.unitManager.playerRace = this.race;
+    if (this.isMultiplayer) this.unitManager.unitIdPrefix = `p${this.mpPlayerIndex}_`;
     this.combatSystem = new CombatSystem(this);
     this.enemyAI = new EnemyAI(this, this.unitManager, this.pathfinder, this.buildingManager);
     this.enemyAI.race = this.enemyRace;
@@ -544,10 +545,10 @@ export class GameScene extends Phaser.Scene {
       // right-click sets its rally point. When units are selected, right-click moves them.
       if (this.unitManager.getSelectedCount() === 0) {
         const activeBuilding = this.selectedBuildings[0] ?? this.productionPanel.getActiveBuilding();
-        if (activeBuilding && activeBuilding.faction === 'player' && activeBuilding.def.produces?.length) {
+        if (activeBuilding && !activeBuilding.isDestroyed() && activeBuilding.faction === 'player' && activeBuilding.def.produces?.length) {
           const tileX = Math.floor(worldX / TILE_SIZE);
           const tileY = Math.floor(worldY / TILE_SIZE);
-          this.selectedBuildings.forEach(b => b.setRallyTile(tileX, tileY));
+          this.selectedBuildings.filter(b => !b.isDestroyed()).forEach(b => b.setRallyTile(tileX, tileY));
           if (this.selectedBuildings.length === 0) activeBuilding.setRallyTile(tileX, tileY);
           this.spawnFloatingText(worldX, worldY - 22, 'Rally set', '#44ff88');
           return true; // consumed — don't move units
@@ -1455,6 +1456,8 @@ export class GameScene extends Phaser.Scene {
 
     this.buildingManager.onBuildingDestroyed = (building: Building) => {
       if (building.faction === 'player') this.stats.buildingsLost++;
+      // Eject any garrisoned workers so they don't vanish permanently
+      if (this.garrisonedWorkers.has(building.id)) this.ejectWorkersFromMine(building);
       if (building === this.playerHQ && !this.gameOver) this.endGame(false);
       if (building === this.enemyHQ && !this.gameOver && this.winCondition === 'hq') {
         // Blitzkrieg: destroy enemy HQ within 5 minutes
@@ -1485,12 +1488,25 @@ export class GameScene extends Phaser.Scene {
           const worker = this.unitManager.spawnWorker(tileX, tileY);
           this.sendWorkerToRallyThenAutoAssign(worker, building);
           this.lastPlayerActionMs = this.gameElapsedMs;
+          // Sync worker to opponent
+          if (this.isMultiplayer) {
+            NetworkManager.instance.sendCommand({ type: 'spawn_unit', unitId: worker.id, tx: tileX, ty: tileY, race: this.race });
+          }
         } else {
           const stats = unitDef.combatStats ?? RACE_COMBAT_STATS[this.race];
           const unit  = this.unitManager.spawnUnit(tileX, tileY, stats, unitDef.id);
           this.sendToRallyOrPost(unit, building);
           this.stats.unitsTrained++;
           this.lastPlayerActionMs = this.gameElapsedMs;
+          // Sync new unit to opponent, plus relay its rally-point move so it walks there too
+          if (this.isMultiplayer) {
+            const net = NetworkManager.instance;
+            net.sendCommand({ type: 'spawn_unit', unitId: unit.id, tx: tileX, ty: tileY, race: this.race });
+            const rally = building.getRallyTile();
+            if (rally) {
+              net.sendCommand({ type: 'move', unitMoves: [{ id: unit.id, tx: rally.tileX, ty: rally.tileY }] });
+            }
+          }
           // ── Hero unit setup ──────────────────────────────────────────────────
           if (unitDef.isHero) {
             unit.setAsHero();
@@ -1510,14 +1526,21 @@ export class GameScene extends Phaser.Scene {
           }
         }
       } else {
-        this.unitManager.spawnEnemyUnit(tileX, tileY);
+        // In singleplayer the AI spawns enemies; in multiplayer enemy units arrive via commands.
+        if (!this.isMultiplayer) {
+          this.unitManager.spawnEnemyUnit(tileX, tileY);
+        }
       }
     };
 
     const { widthInPixels, heightInPixels } = this.mapManager.getMapDimensions();
     this.cameras.main.setBounds(0, 0, widthInPixels, heightInPixels);
     this.cameras.main.setZoom(1.0);
-    this.cameras.main.centerOn(widthInPixels / 4, heightInPixels / 4);
+    if (this.isMultiplayer && this.mpPlayerIndex === 1) {
+      this.cameras.main.centerOn(ENEMY_BASE_TILE.x * TILE_SIZE, ENEMY_BASE_TILE.y * TILE_SIZE);
+    } else {
+      this.cameras.main.centerOn(widthInPixels / 4, heightInPixels / 4);
+    }
     this.cameras.main.fadeIn(400);
 
     // ── Score overlay (shown while TAB is held) ───────────────────────────────
@@ -1649,27 +1672,131 @@ export class GameScene extends Phaser.Scene {
     // Disable the AI — humans are playing both sides
     this.enemyAI.setEnabled(false);
 
-    // ── Outgoing: intercept InputHandler move commands ────────────────────────
-    // We wrap moveSelectedUnits so every move is also sent to the server.
+    // Show player index badge so users can verify their role
+    const badge = this.add.text(8, 8,
+      `You are Player ${this.mpPlayerIndex + 1} (${this.race})`,
+      { fontSize: '13px', color: '#ffffff', backgroundColor: '#00000099', padding: { x: 6, y: 3 } }
+    ).setScrollFactor(0).setDepth(9999);
+    this.time.delayedCall(8000, () => badge.destroy());
+
+    // ── Outgoing: intercept move commands ─────────────────────────────────────
+    // Wrap moveSelectedUnits so every move is also forwarded to the opponent.
+    // We send per-unit destinations (with formation offsets) so the remote screen
+    // shows proper spread instead of every unit stacking on one tile.
     const origMove = this.unitManager.moveSelectedUnits.bind(this.unitManager);
     this.unitManager.moveSelectedUnits = (tx: number, ty: number) => {
       origMove(tx, ty);
-      const unitIds = Array.from(this.unitManager.selectedUnits)
-        .filter(u => u.isAlive())
+      const units = Array.from(this.unitManager.selectedUnits).filter(u => u.isAlive());
+      if (units.length === 0) return;
+      // Build per-unit move entries: each unit now has a path destination set
+      // by origMove, but we approximate by sending the same formation offsets.
+      const unitMoves = units.map((u, i) => {
+        const cols = Math.max(1, Math.ceil(Math.sqrt(units.length)));
+        const STRIDE = 2;
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const ox = Math.round((col - (cols - 1) / 2) * STRIDE);
+        const oy = Math.round((row - (Math.ceil(units.length / cols) - 1) / 2) * STRIDE);
+        return { id: u.id, tx: tx + ox, ty: ty + oy };
+      });
+      net.sendCommand({ type: 'move', unitMoves });
+    };
+
+    // Wrap attackTargetUnit so right-clicking an enemy unit relays the command.
+    const origAttack = this.unitManager.attackTargetUnit.bind(this.unitManager);
+    this.unitManager.attackTargetUnit = (target) => {
+      origAttack(target);
+      const attackerIds = Array.from(this.unitManager.selectedUnits)
+        .filter(u => u.isAlive() && u.canAttack)
         .map(u => u.id);
-      if (unitIds.length > 0) {
-        net.sendCommand({ type: 'move', unitIds, tx, ty });
+      if (attackerIds.length > 0) {
+        const tile = target.getCurrentTile();
+        net.sendCommand({ type: 'attack_target', attackerIds, targetId: target.id, tx: tile.tileX, ty: tile.tileY });
       }
     };
 
+    // Wrap stopSelectedUnits so S-key stop is also relayed.
+    const origStop = this.unitManager.stopSelectedUnits.bind(this.unitManager);
+    this.unitManager.stopSelectedUnits = () => {
+      origStop();
+      const unitIds = Array.from(this.unitManager.selectedUnits).filter(u => u.isAlive()).map(u => u.id);
+      if (unitIds.length > 0) net.sendCommand({ type: 'stop', unitIds });
+    };
+
+    // Wrap queueMoveSelectedUnits (Shift+right-click) to relay waypoints.
+    // Use a distinct 'queue_move' type so the receiver appends rather than replaces.
+    const origQueue = this.unitManager.queueMoveSelectedUnits.bind(this.unitManager);
+    this.unitManager.queueMoveSelectedUnits = (tx: number, ty: number) => {
+      origQueue(tx, ty);
+      const units = Array.from(this.unitManager.selectedUnits).filter(u => u.isAlive());
+      if (units.length === 0) return;
+      const unitMoves = units.map((u, i) => {
+        const cols = Math.max(1, Math.ceil(Math.sqrt(units.length)));
+        const STRIDE = 2;
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const ox = Math.round((col - (cols - 1) / 2) * STRIDE);
+        const oy = Math.round((row - (Math.ceil(units.length / cols) - 1) / 2) * STRIDE);
+        return { id: u.id, tx: tx + ox, ty: ty + oy };
+      });
+      net.sendCommand({ type: 'queue_move', unitMoves });
+    };
+
+    // Intercept stance changes so the mirrored units use the same combat stance.
+    const origSetStance = this.unitManager.setStanceForSelected.bind(this.unitManager);
+    this.unitManager.setStanceForSelected = (stance: import('@/units/Unit').UnitStance) => {
+      origSetStance(stance);
+      const unitIds = Array.from(this.unitManager.selectedUnits)
+        .filter(u => u.isAlive() && u.faction === 'player' && !u.isWorker)
+        .map(u => u.id);
+      if (unitIds.length > 0) net.sendCommand({ type: 'set_stance', stance, unitIds });
+    };
+
+    // Wrap startPatrolForSelected so patrol routes appear on both screens.
+    const origPatrol = this.unitManager.startPatrolForSelected.bind(this.unitManager);
+    this.unitManager.startPatrolForSelected = (toTileX: number, toTileY: number) => {
+      origPatrol(toTileX, toTileY);
+      const units = Array.from(this.unitManager.selectedUnits).filter(u => u.isAlive() && !u.isWorker && u.canAttack);
+      if (units.length === 0) return;
+      const patrols = units.map(u => {
+        const { tileX: fromX, tileY: fromY } = u.getCurrentTile();
+        return { id: u.id, fromTileX: fromX, fromTileY: fromY, toTileX, toTileY };
+      });
+      net.sendCommand({ type: 'patrol', patrols });
+    };
+
+    // Wrap moveSpecificUnits (minimap double-click: move idle military to clicked tile).
+    const origMoveSpecific = this.unitManager.moveSpecificUnits.bind(this.unitManager);
+    this.unitManager.moveSpecificUnits = (units: import('@/units/Unit').Unit[], tx: number, ty: number) => {
+      origMoveSpecific(units, tx, ty);
+      const alive = units.filter(u => u.isAlive() && u.faction === 'player');
+      if (alive.length === 0) return;
+      const cols = Math.max(1, Math.ceil(Math.sqrt(alive.length)));
+      const rows = Math.ceil(alive.length / cols);
+      const STRIDE = 2;
+      const unitMoves = alive.map((u, i) => {
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const ox = Math.round((col - (cols - 1) / 2) * STRIDE);
+        const oy = Math.round((row - (rows - 1) / 2) * STRIDE);
+        return { id: u.id, tx: tx + ox, ty: ty + oy };
+      });
+      net.sendCommand({ type: 'move', unitMoves });
+    };
+
     // ── Incoming: handle commands relayed from the other player ──────────────
-    net.on('command', (cmd: CommandPayload) => {
-      this.handleRemoteCommand(cmd);
-    });
+    const commandHandler = (cmd: CommandPayload) => this.handleRemoteCommand(cmd);
+    net.on('command', commandHandler);
 
     // ── Opponent disconnect ───────────────────────────────────────────────────
     net.on('player:left', () => {
-      this.showScreenMessage('Opponent disconnected', '#ff4444');
+      if (!this.gameOver) {
+        this.showScreenMessage('Opponent disconnected — you win!', '#44ff88');
+        // Give a short delay so the message is visible before the end screen
+        this.time.delayedCall(2000, () => {
+          if (!this.gameOver) this.endGame(true);
+        });
+      }
     });
 
     net.on('game:over', (data: { winnerId?: string }) => {
@@ -1678,6 +1805,22 @@ export class GameScene extends Phaser.Scene {
         this.endGame(won);
       }
     });
+
+    // ── Initial unit sync — retry several times to survive any race condition ──
+    const sendSync = () => {
+      if (this.gameOver) return; // game ended before retry fired
+      const myUnits = this.unitManager.getAllUnits()
+        .filter(u => u.faction === 'player' && u.isAlive())
+        .map(u => {
+          const tile = u.getCurrentTile();
+          return { id: u.id, tileX: tile.tileX, tileY: tile.tileY, race: this.race, isWorker: u.isWorker };
+        });
+      net.sendCommand({ type: 'sync_units', units: myUnits });
+    };
+    // Send at 400 ms, 1500 ms, and 4000 ms — the receiving side deduplicates.
+    setTimeout(sendSync, 400);
+    setTimeout(sendSync, 1500);
+    setTimeout(sendSync, 4000);
   }
 
   /**
@@ -1687,10 +1830,48 @@ export class GameScene extends Phaser.Scene {
   private handleRemoteCommand(cmd: CommandPayload): void {
     switch (cmd.type) {
       case 'move': {
-        const unitIds = cmd.unitIds as string[];
+        // New format: per-unit destinations with offsets already baked in
+        const unitMoves = cmd.unitMoves as Array<{ id: string; tx: number; ty: number }> | undefined;
+        // Legacy format: shared destination for all units
+        const unitIds = cmd.unitIds as string[] | undefined;
         const tx = cmd.tx as number;
         const ty = cmd.ty as number;
-        unitIds.forEach(id => {
+
+        if (unitMoves) {
+          unitMoves.forEach(({ id, tx: destX, ty: destY }) => {
+            const unit = this.unitManager.getUnitById(id);
+            if (!unit || !unit.isAlive()) return;
+            const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
+            this.pathfinder.findPath(fromX, fromY, destX, destY, (path) => {
+              if (path && path.length > 0) unit.setPath(path);
+            });
+          });
+        } else if (unitIds) {
+          unitIds.forEach(id => {
+            const unit = this.unitManager.getUnitById(id);
+            if (!unit || !unit.isAlive()) return;
+            const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
+            this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
+              if (path && path.length > 0) unit.setPath(path);
+            });
+          });
+        }
+        break;
+      }
+      case 'stop': {
+        const unitIds = cmd.unitIds as string[];
+        unitIds?.forEach(id => {
+          const unit = this.unitManager.getUnitById(id);
+          if (unit?.isAlive()) unit.stopMoving();
+        });
+        break;
+      }
+      case 'attack_target': {
+        // Remote player right-clicked an enemy unit — move the attacker units toward it
+        const attackerIds = cmd.attackerIds as string[];
+        const tx = cmd.tx as number;
+        const ty = cmd.ty as number;
+        attackerIds?.forEach(id => {
           const unit = this.unitManager.getUnitById(id);
           if (!unit || !unit.isAlive()) return;
           const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
@@ -1701,15 +1882,65 @@ export class GameScene extends Phaser.Scene {
         break;
       }
       case 'spawn_unit': {
+        // Remote player produced a unit from a building — create it as enemy faction
         const tx = cmd.tx as number;
         const ty = cmd.ty as number;
-        const unitTypeId = (cmd.unitTypeId as string) ?? '';
-        this.unitManager.spawnUnit(tx, ty, undefined, unitTypeId);
+        const unitId = (cmd.unitId as string) ?? '';
+        const race   = (cmd.race   as Race)   ?? this.mpOpponentRace;
+        if (unitId) {
+          this.unitManager.spawnEnemyUnitWithId(unitId, tx, ty, race);
+        } else {
+          this.unitManager.spawnEnemyUnit(tx, ty, undefined, race);
+        }
         break;
       }
-      case 'produce': {
-        // Remote player produced a unit — handled server-side via existing building logic
-        // (future: could sync production queues here)
+      case 'sync_units': {
+        // Opponent is sending their unit positions — create/update enemy versions.
+        // spawnEnemyUnitWithId deduplicates so retries are safe.
+        const units = cmd.units as Array<{ id: string; tileX: number; tileY: number; race: Race; isWorker?: boolean }>;
+        units?.forEach(u => {
+          this.unitManager.spawnEnemyUnitWithId(u.id, u.tileX, u.tileY, u.race);
+        });
+        break;
+      }
+      case 'set_stance': {
+        const stance = cmd.stance as import('@/units/Unit').UnitStance;
+        const unitIds = cmd.unitIds as string[];
+        unitIds?.forEach(id => {
+          const unit = this.unitManager.getUnitById(id);
+          if (unit?.isAlive()) unit.setStance(stance);
+        });
+        break;
+      }
+      case 'patrol': {
+        const patrols = cmd.patrols as Array<{ id: string; fromTileX: number; fromTileY: number; toTileX: number; toTileY: number }>;
+        patrols?.forEach(p => {
+          const unit = this.unitManager.getUnitById(p.id);
+          if (unit?.isAlive()) unit.startPatrol(p.fromTileX, p.fromTileY, p.toTileX, p.toTileY);
+        });
+        break;
+      }
+      case 'queue_move': {
+        // Shift+right-click waypoint — append to unit's order queue, don't replace path
+        const queueMoves = cmd.unitMoves as Array<{ id: string; tx: number; ty: number }> | undefined;
+        queueMoves?.forEach(({ id, tx: destX, ty: destY }) => {
+          const unit = this.unitManager.getUnitById(id);
+          if (!unit || !unit.isAlive()) return;
+          unit.queueOrder(destX, destY);
+        });
+        break;
+      }
+      case 'place_building': {
+        // Opponent placed a building — create an enemy-faction mirror on our screen
+        // so our units can attack it and the pathfinder blocks those tiles correctly.
+        const defId = cmd.defId as string;
+        const tx    = cmd.tx as number;
+        const ty    = cmd.ty as number;
+        const race  = (cmd.race as Race) ?? this.mpOpponentRace;
+        const def   = getBuildingDefById(defId, race);
+        if (def) {
+          this.buildingManager.placeBuilding(def, tx, ty, true, 'enemy');
+        }
         break;
       }
       default:
@@ -1727,7 +1958,15 @@ export class GameScene extends Phaser.Scene {
     // When a node depletes: stop any workers still assigned to it
     this.events.on('node:depleted', (node: ResourceNode) => {
       this.unitManager.getAllUnits().forEach(u => {
-        if (u instanceof WorkerUnit && u.miningNode === node) {
+        if (!(u instanceof WorkerUnit) || u.miningNode !== node) return;
+        if (u.miningState === 'harvesting') {
+          // Worker is inside the mine — animate exit before stopping so they
+          // don't snap to the impassable node-center tile.
+          u.miningState = 'exiting_mine';
+          u.animateExitMine(() => {
+            if (u.miningState === 'exiting_mine') this.stopWorkerMining(u);
+          });
+        } else {
           this.stopWorkerMining(u);
         }
       });
@@ -1794,12 +2033,18 @@ export class GameScene extends Phaser.Scene {
 
   private placeStartingHQ(): void {
     const [hqDef] = getBuildingsForRace(this.race);
-    this.playerHQ = this.buildingManager.placeBuilding(hqDef, BASE_TILE.x - 1, BASE_TILE.y - 3, true, 'player');
+    const isP1 = this.isMultiplayer && this.mpPlayerIndex === 1;
+    const tx = isP1 ? ENEMY_BASE_TILE.x : BASE_TILE.x - 1;
+    const ty = isP1 ? ENEMY_BASE_TILE.y : BASE_TILE.y - 3;
+    this.playerHQ = this.buildingManager.placeBuilding(hqDef, tx, ty, true, 'player');
   }
 
   private placeEnemyHQ(): void {
     const [hqDef] = getBuildingsForRace(this.enemyRace);
-    this.enemyHQ = this.buildingManager.placeBuilding(hqDef, ENEMY_BASE_TILE.x, ENEMY_BASE_TILE.y, true, 'enemy');
+    const isP1 = this.isMultiplayer && this.mpPlayerIndex === 1;
+    const tx = isP1 ? BASE_TILE.x - 1 : ENEMY_BASE_TILE.x;
+    const ty = isP1 ? BASE_TILE.y - 3 : ENEMY_BASE_TILE.y;
+    this.enemyHQ = this.buildingManager.placeBuilding(hqDef, tx, ty, true, 'enemy');
   }
 
   /** Brief fade-in/out banner at game start announcing the enemy faction. */
@@ -1824,12 +2069,24 @@ export class GameScene extends Phaser.Scene {
 
   private spawnInitialUnits(): void {
     const stats = RACE_COMBAT_STATS[this.race];
-    this.unitManager.spawnUnit(7, 4, stats);
-    this.unitManager.spawnUnit(8, 4, stats);
-    this.unitManager.spawnUnit(7, 6, stats);
-    this.unitManager.spawnUnit(8, 6, stats);
-    this.unitManager.spawnWorker(5, 7);
-    this.unitManager.spawnWorker(6, 7);
+    if (this.isMultiplayer && this.mpPlayerIndex === 1) {
+      // Player 1 spawns near ENEMY_BASE_TILE (bottom-right of map)
+      const ex = ENEMY_BASE_TILE.x;
+      const ey = ENEMY_BASE_TILE.y;
+      this.unitManager.spawnUnit(ex - 2, ey - 1, stats);
+      this.unitManager.spawnUnit(ex - 3, ey - 1, stats);
+      this.unitManager.spawnUnit(ex - 2, ey + 1, stats);
+      this.unitManager.spawnUnit(ex - 3, ey + 1, stats);
+      this.unitManager.spawnWorker(ex - 2, ey + 3);
+      this.unitManager.spawnWorker(ex - 3, ey + 3);
+    } else {
+      this.unitManager.spawnUnit(7, 4, stats);
+      this.unitManager.spawnUnit(8, 4, stats);
+      this.unitManager.spawnUnit(7, 6, stats);
+      this.unitManager.spawnUnit(8, 6, stats);
+      this.unitManager.spawnWorker(5, 7);
+      this.unitManager.spawnWorker(6, 7);
+    }
   }
 
   private findNearestNode(tileX: number, tileY: number, type: 'gold' | 'juice'): ResourceNode | null {
@@ -1857,6 +2114,9 @@ export class GameScene extends Phaser.Scene {
         };
       }
     }
+    if (b && this.isMultiplayer) {
+      NetworkManager.instance.sendCommand({ type: 'place_building', defId: def.id, tx, ty, race: this.race });
+    }
     return b;
   }
 
@@ -1871,6 +2131,11 @@ export class GameScene extends Phaser.Scene {
 
     // Spend gold up-front (same as normal placement)
     if (!this.resources.spendGold(def.goldCost)) return;
+
+    // Cancel any active mining assignment so the mining loop doesn't
+    // fight over the worker while it's building
+    const workerUnit = worker as WorkerUnit;
+    if (workerUnit.miningState !== 'idle') this.stopWorkerMining(workerUnit);
 
     const worldX = (tx + def.tileWidth  / 2) * TILE_SIZE;
     const worldY = (ty + def.tileHeight / 2) * TILE_SIZE;
@@ -2277,6 +2542,10 @@ export class GameScene extends Phaser.Scene {
     const hqTileX = Math.floor(hqCenter.x / TILE_SIZE);
     const hqTileY = Math.floor(hqCenter.y / TILE_SIZE);
 
+    // Direct mining (no linked building) = 2\u00d7 harvest time
+    const hasLinkedBuilding = this.buildingManager.getBuildings()
+      .some(b => b.faction === 'player' && b.getLinkedNode() === node);
+
     for (const worker of workers) {
       if (!worker.isAlive() || worker.isGarrisoned) continue;
       if (node.isSaturated()) {
@@ -2288,23 +2557,38 @@ export class GameScene extends Phaser.Scene {
 
       if (!node.addWorker()) continue; // double-check saturation
       this.miningAssignments.set(worker.id, node);
+      worker.directMining = !hasLinkedBuilding;
       worker.startMining(node, hqTileX, hqTileY);
       this.pathWorkerToNode(worker, node);
-      this.spawnFloatingText(worker.sprite.x, worker.sprite.y - 26, '\u26cf Mining', node.type === 'gold' ? '#ffd700' : '#cc88ff');
+      const label = hasLinkedBuilding ? '\u26cf Mining' : '\u26cf Direct';
+      this.spawnFloatingText(worker.sprite.x, worker.sprite.y - 26, label, node.type === 'gold' ? '#ffd700' : '#cc88ff');
     }
   }
 
   /** Cancel a worker's mining assignment and clean up. */
   private stopWorkerMining(worker: WorkerUnit): void {
-    const node = this.miningAssignments.get(worker.id);
-    if (node) node.removeWorker();
     this.miningAssignments.delete(worker.id);
-    worker.stopMining();
+    worker.stopMining(); // handles node.removeWorker() internally
   }
 
   /** Issue a pathfinding request for a worker to walk to its assigned node. */
   private pathWorkerToNode(worker: WorkerUnit, node: ResourceNode): void {
     const { tileX, tileY } = worker.getCurrentTile();
+    const nodeWorldX = node.tileX * TILE_SIZE + TILE_SIZE / 2;
+    const nodeWorldY = node.tileY * TILE_SIZE + TILE_SIZE / 2;
+    const harvestDur = worker.directMining
+      ? worker.HARVEST_DURATION_MS * 2
+      : worker.HARVEST_DURATION_MS;
+
+    const enterMine = () => {
+      if (worker.miningState !== 'to_node') return;
+      worker.animateEnterMine(nodeWorldX, nodeWorldY, () => {
+        if (worker.miningState !== 'to_node') return;
+        worker.miningState = 'harvesting';
+        worker.harvestTimer = harvestDur;
+      });
+    };
+
     // Node tiles are impassable in the tilemap — path to the closest adjacent tile instead.
     // Issue all four requests in parallel; first non-null result wins.
     const adj = [
@@ -2321,10 +2605,7 @@ export class GameScene extends Phaser.Scene {
     // pathfinding entirely — EasyStar returns an empty path for same-tile
     // queries, which would leave the worker stuck in 'to_node' forever.
     if (adj.some(d => d.x === tileX && d.y === tileY)) {
-      if (worker.miningState === 'to_node') {
-        worker.miningState = 'harvesting';
-        worker.harvestTimer = worker.HARVEST_DURATION_MS;
-      }
+      enterMine();
       return;
     }
 
@@ -2333,11 +2614,7 @@ export class GameScene extends Phaser.Scene {
       this.pathfinder.findPath(tileX, tileY, dest.x, dest.y, (path) => {
         if (resolved || !path || path.length === 0 || worker.miningState !== 'to_node') return;
         resolved = true;
-        worker.setPath(path, () => {
-          if (worker.miningState !== 'to_node') return;
-          worker.miningState = 'harvesting';
-          worker.harvestTimer = worker.HARVEST_DURATION_MS;
-        });
+        worker.setPath(path, enterMine);
       });
     }
   }
@@ -2351,7 +2628,8 @@ export class GameScene extends Phaser.Scene {
       // Find the unit (use getAllUnits since worker could be alive but moving)
       const unit = this.unitManager.getAllUnits().find(u => u.id === workerId);
       if (!unit || !unit.isAlive()) {
-        // Worker died — remove assignment
+        // Worker died — remove assignment; reset state so any in-flight tween callbacks bail
+        if (unit) (unit as WorkerUnit).miningState = 'idle';
         node.removeWorker();
         this.miningAssignments.delete(workerId);
         continue;
@@ -2361,20 +2639,22 @@ export class GameScene extends Phaser.Scene {
       if (worker.miningState === 'harvesting') {
         worker.harvestTimer -= delta;
         if (worker.harvestTimer <= 0) {
-          // Node could have been depleted by mine buildings
+          // Node could have been depleted by mine buildings while worker was inside.
+          // Animate the worker emerging before stopping so they don't snap to the
+          // impassable node-center tile.
           if (node.isDepleted()) {
-            this.stopWorkerMining(worker);
+            worker.miningState = 'exiting_mine';
+            worker.animateExitMine(() => {
+              if (worker.miningState === 'exiting_mine') this.stopWorkerMining(worker);
+            });
             continue;
           }
           // Pick up resources
           worker.carryAmount = node.harvest(worker.CARRY_CAPACITY);
+          // harvest() may fire node:depleted synchronously, which calls stopWorkerMining
+          // and resets miningState to 'idle'. Cast to string to defeat TS narrowing.
+          if ((worker.miningState as string) === 'idle') continue;
           worker.carryType = node.type;
-          worker.showCarryVisual(node.type);
-
-          // Head to HQ
-          worker.miningState = 'to_hq';
-          const hqTile = worker.miningHQTile!;
-          const { tileX, tileY } = worker.getCurrentTile();
 
           // Helper: deposit resources and kick off the next trip.
           const depositAndContinue = () => {
@@ -2399,16 +2679,26 @@ export class GameScene extends Phaser.Scene {
             this.pathWorkerToNode(worker, node);
           };
 
-          // If already at the HQ tile, deposit immediately — EasyStar returns
-          // an empty path for same-tile queries and the callback would never fire.
-          if (tileX === hqTile.tileX && tileY === hqTile.tileY) {
-            depositAndContinue();
-          } else {
-            this.pathfinder.findPath(tileX, tileY, hqTile.tileX, hqTile.tileY, (path) => {
-              if (!path || path.length === 0 || worker.miningState !== 'to_hq') return;
-              worker.setPath(path, depositAndContinue);
-            });
-          }
+          // Animate the worker emerging from the mine, then path to HQ
+          worker.miningState = 'exiting_mine';
+          worker.animateExitMine(() => {
+            if (worker.miningState !== 'exiting_mine') return;
+            worker.showCarryVisual(worker.carryType!);
+            worker.miningState = 'to_hq';
+            const hqTile = worker.miningHQTile!;
+            const { tileX, tileY } = worker.getCurrentTile();
+
+            // If already at the HQ tile, deposit immediately — EasyStar returns
+            // an empty path for same-tile queries and the callback would never fire.
+            if (tileX === hqTile.tileX && tileY === hqTile.tileY) {
+              depositAndContinue();
+            } else {
+              this.pathfinder.findPath(tileX, tileY, hqTile.tileX, hqTile.tileY, (path) => {
+                if (!path || path.length === 0 || worker.miningState !== 'to_hq') return;
+                worker.setPath(path, depositAndContinue);
+              });
+            }
+          });
         }
       }
     }
@@ -2443,7 +2733,10 @@ export class GameScene extends Phaser.Scene {
       const hqTileX  = Math.floor(hqCenter.x / TILE_SIZE);
       const hqTileY  = Math.floor(hqCenter.y / TILE_SIZE);
       if (!node.addWorker()) return; // race-safe guard
+      const hasLinkedBuilding = this.buildingManager.getBuildings()
+        .some(b => b.faction === 'player' && b.getLinkedNode() === node);
       this.miningAssignments.set(worker.id, node);
+      worker.directMining = !hasLinkedBuilding;
       worker.startMining(node, hqTileX, hqTileY);
       this.pathWorkerToNode(worker, node);
       this.spawnFloatingText(worker.sprite.x, worker.sprite.y - 26, '⛏ Mining', '#ffd700');
@@ -2707,8 +3000,10 @@ export class GameScene extends Phaser.Scene {
       this.spawnFloatingText(wx, wy - 44, 'Wormhole linked!', '#cc44ff');
     }
 
-    // Destroy portal gfx when building is destroyed
+    // Destroy portal gfx when building is destroyed — chain after the BuildingManager callback
+    const prevOnDestroyed = building.onDestroyed;
     building.onDestroyed = () => {
+      prevOnDestroyed?.();
       portalGfx.destroy();
       labelText.destroy();
       // Unlink partner
@@ -3539,6 +3834,12 @@ export class GameScene extends Phaser.Scene {
 
   /** Update pulsing selection rings to match the current selectedBuildings array. */
   private updateBuildingSelectionRings(): void {
+    // Drop any destroyed buildings from the selection first
+    const before = this.selectedBuildings.length;
+    this.selectedBuildings = this.selectedBuildings.filter(b => !b.isDestroyed());
+    if (this.selectedBuildings.length < before && this.selectedBuildings.length === 0) {
+      this.productionPanel.hide();
+    }
     const currentIds = new Set(this.selectedBuildings.map(b => b.id));
 
     // Remove rings for deselected buildings
@@ -3745,6 +4046,7 @@ export class GameScene extends Phaser.Scene {
 
   private togglePause(): void {
     if (this.gameOver) return;
+    if (this.isMultiplayer) return; // pausing one client while the other runs causes divergence
     this.isPaused = !this.isPaused;
     if (this.isPaused) {
       const { width, height } = this.scale;
@@ -3767,6 +4069,7 @@ export class GameScene extends Phaser.Scene {
   private static readonly SPEED_STEPS = [0.5, 1, 1.5, 2];
 
   private stepGameSpeed(dir: 1 | -1): void {
+    if (this.isMultiplayer) return; // speed changes only affect local simulation — disabled in MP
     const steps = GameScene.SPEED_STEPS;
     const idx = steps.indexOf(this.gameSpeed);
     const next = idx === -1
@@ -3793,6 +4096,13 @@ export class GameScene extends Phaser.Scene {
   private endGame(won: boolean): void {
     this.gameOver = true;
     this.enemyAI.destroy();
+
+    // In multiplayer, broadcast the result so the opponent's screen also ends.
+    // Only the winner sends this (to avoid double-broadcast when both simulationsreach the same conclusion).
+    if (this.isMultiplayer && won) {
+      const net = NetworkManager.instance;
+      net.sendGameOver(net.sessionId);
+    }
 
     // Save replay event log to localStorage (only for real games, not already-replaying)
     if (!this._replayMode && this._replayEventLog.length > 0) {
@@ -4952,6 +5262,17 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  // ── Scene lifecycle ────────────────────────────────────────────────────────
+
+  /** Clean up NetworkManager listeners and room connection when leaving this scene. */
+  shutdown(): void {
+    if (this.isMultiplayer) {
+      const net = NetworkManager.instance;
+      net.offAllEvents();
+      net.disconnect();
+    }
+  }
+
   // ── Game loop ──────────────────────────────────────────────────────────────
 
   update(_time: number, delta: number): void {
@@ -5216,6 +5537,8 @@ export class GameScene extends Phaser.Scene {
     // Refresh building repellers so new buildings steer units around them
     if (this._frameCount % 30 === 0) {
       this.refreshBuildingRepellers();
+      // Prune destroyed buildings from selectedBuildings (covers mid-game destruction)
+      this.updateBuildingSelectionRings();
     }
 
     // Fog-of-war runs every 2 frames — halves O(n·m) cost with no visible effect

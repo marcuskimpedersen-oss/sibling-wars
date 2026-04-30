@@ -651,3 +651,8 @@ export function getBuildingsForRace(race: Race): BuildingDef[] {
 export function getRaceTint(race: Race): number {
   return RACE_TINTS[race];
 }
+
+export function getBuildingDefById(id: string, race: Race): BuildingDef | null {
+  const allDefs = [...getBuildingsForRace(race), MINE_DEF, JUICE_COLLECTOR_DEF];
+  return allDefs.find(d => d.id === id) ?? null;
+}

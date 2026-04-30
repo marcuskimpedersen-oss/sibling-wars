@@ -1,9 +1,29 @@
 import express from 'express';
 import { createServer } from 'http';
 import cors from 'cors';
-import { Server, matchMaker } from '@colyseus/core';
-import { WebSocketTransport } from '@colyseus/ws-transport';
+import { Server, matchMaker, ClientState } from '@colyseus/core';
+import { WebSocketTransport, WebSocketClient } from '@colyseus/ws-transport';
 import { GameRoom } from './rooms/GameRoom';
+
+// ── Fix: Protocol.js reuses a shared packr.buffer for every encoded message,
+// returning subarray *views* rather than copies.  When a second message is
+// encoded in the same synchronous tick the first view is silently overwritten.
+// For JOINING clients those views are stored in _enqueuedMessages and get
+// flushed later — by which point they contain garbage.  Store copies instead.
+(WebSocketClient.prototype as any).enqueueRaw = function (
+  data: Buffer | Uint8Array,
+  options?: Record<string, unknown>,
+) {
+  if (options?.afterNextPatch) {
+    (this._afterNextPatchQueue as unknown[]).push([this, [data]]);
+    return;
+  }
+  if (this.state === ClientState.JOINING) {
+    (this._enqueuedMessages as Buffer[]).push(Buffer.from(data)); // copy, not view
+    return;
+  }
+  this.raw(data, options);
+};
 
 const app = express();
 const port = 2567;

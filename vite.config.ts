@@ -9,6 +9,7 @@ export default defineConfig({
     assetsInlineLimit: 0
   },
   server: {
+    allowedHosts: true,
     proxy: {
       '/colyseus': {
         target: 'http://localhost:2567',

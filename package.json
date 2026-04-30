@@ -14,8 +14,10 @@
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
-    "@colyseus/ws-transport": "^0.17.11",
-    "colyseus": "^0.17.8",
+    "@colyseus/core": "^0.16.5",
+    "@colyseus/schema": "^3.0.76",
+    "@colyseus/ws-transport": "^0.16.5",
+    "colyseus": "^0.16.5",
     "colyseus.js": "^0.16.22",
     "cors": "^2.8.6",
     "easystarjs": "^0.4.4",

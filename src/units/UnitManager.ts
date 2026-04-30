@@ -36,6 +36,8 @@ export class UnitManager {
   private resources: ResourceManager;
   private pathfinder: PathfinderService;
   playerRace: Race = 'architects';
+  /** Prepended to every auto-generated unit ID to avoid cross-player conflicts in multiplayer. */
+  unitIdPrefix: string = '';
 
   attackBonus: number = 0;
   armorBonus: number = 0;
@@ -63,7 +65,7 @@ export class UnitManager {
   onEnemyDied: ((unit: Unit) => void) | null = null;
 
   spawnUnit(tileX: number, tileY: number, stats?: CombatStats, unitTypeId = ''): Unit {
-    const id = `unit_${this.nextId++}`;
+    const id = `${this.unitIdPrefix}unit_${this.nextId++}`;
     const base = stats ?? RACE_COMBAT_STATS[this.playerRace];
     const boosted = { ...base, attackDamage: base.attackDamage + this.attackBonus };
     const unit = new Unit(this.scene, tileX, tileY, id, 'unit', 'player', boosted);
@@ -96,7 +98,7 @@ export class UnitManager {
   }
 
   spawnWorker(tileX: number, tileY: number): WorkerUnit {
-    const id = `worker_${this.nextId++}`;
+    const id = `${this.unitIdPrefix}worker_${this.nextId++}`;
     const worker = new WorkerUnit(this.scene, tileX, tileY, id);
     // Workers get a lighter tint — same race colour but softer
     const raceTint = getRaceTint(this.playerRace);
@@ -114,6 +116,18 @@ export class UnitManager {
     const unit = new Unit(this.scene, tileX, tileY, id, 'enemy_unit', 'enemy', stats ?? ENEMY_COMBAT_STATS);
     if (race) unit.sprite.setTint(getRaceTint(race));
     if (unitTypeId) unit.unitTypeId = unitTypeId;
+    this.units.set(id, unit);
+    return unit;
+  }
+
+  /** Spawn an enemy unit with a caller-supplied ID (used for multiplayer remote unit sync). */
+  spawnEnemyUnitWithId(id: string, tileX: number, tileY: number, race: Race, stats?: CombatStats): Unit {
+    // Dedup: if a unit with this ID already exists, return the existing one
+    const existing = this.units.get(id);
+    if (existing) return existing;
+    const unit = new Unit(this.scene, tileX, tileY, id, 'enemy_unit', 'enemy', stats ?? RACE_COMBAT_STATS[race] ?? ENEMY_COMBAT_STATS);
+    unit.sprite.setTint(getRaceTint(race));
+    unit.unitRace = race;
     this.units.set(id, unit);
     return unit;
   }
@@ -152,6 +166,9 @@ export class UnitManager {
     this.deselectAll();
     this.units.forEach(unit => {
       if (!unit.isAlive() || unit.faction === 'enemy' || unit.isGarrisoned) return;
+      // Skip workers who are physically inside a mine node (sprite alpha=0 at node center)
+      if ((unit as WorkerUnit).miningState === 'harvesting' ||
+          (unit as WorkerUnit).miningState === 'exiting_mine') return;
       const { x, y } = unit.getPosition();
       if (worldRect.contains(x, y)) { this.selectedUnits.add(unit); unit.setSelected(true); }
     });

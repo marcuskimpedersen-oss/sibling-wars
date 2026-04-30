@@ -3,7 +3,7 @@ import Phaser from 'phaser';
 import { WORKER_SPEED, WORKER_COMBAT_STATS } from '@/constants';
 import { ResourceNode } from '@/economy/ResourceNode';
 
-export type WorkerMiningState = 'idle' | 'to_node' | 'harvesting' | 'to_hq';
+export type WorkerMiningState = 'idle' | 'to_node' | 'harvesting' | 'exiting_mine' | 'to_hq';
 
 /**
  * Worker unit — select to open build menu, click to place buildings.
@@ -22,6 +22,11 @@ export class WorkerUnit extends Unit {
   harvestTimer: number = 0;
   readonly HARVEST_DURATION_MS = 2200;
   readonly CARRY_CAPACITY = 20;
+  /** True when mining without a linked Mine/Juice Collector building — uses 2× harvest time. */
+  directMining: boolean = false;
+  /** World position where the worker stood before entering the mine (used for exit animation). */
+  miningExitWorldX: number = -1;
+  miningExitWorldY: number = -1;
 
   private carryDot: Phaser.GameObjects.Arc | null = null;
 
@@ -52,7 +57,38 @@ export class WorkerUnit extends Unit {
     this.miningHQTile = null;
     this.carryAmount = 0;
     this.carryType = null;
+    this.directMining = false;
+    // Restore sprite if interrupted mid-animation
+    this.scene.tweens.killTweensOf(this.sprite);
+    this.sprite.setScale(1).setAlpha(1);
     this.hideCarryVisual();
+  }
+
+  /** Tween the worker into the mine tile (shrinks to nothing). Saves exit world position. */
+  animateEnterMine(nodeWorldX: number, nodeWorldY: number, onComplete: () => void): void {
+    this.miningExitWorldX = this.sprite.x;
+    this.miningExitWorldY = this.sprite.y;
+    this.scene.tweens.killTweensOf(this.sprite);
+    this.scene.tweens.add({
+      targets: this.sprite,
+      x: nodeWorldX, y: nodeWorldY,
+      scaleX: 0, scaleY: 0, alpha: 0,
+      duration: 350, ease: 'Sine.easeIn',
+      onComplete,
+    });
+  }
+
+  /** Snap sprite to saved exit position and tween it back to full visibility. */
+  animateExitMine(onComplete: () => void): void {
+    this.scene.tweens.killTweensOf(this.sprite);
+    this.sprite.setPosition(this.miningExitWorldX, this.miningExitWorldY);
+    this.sprite.setScale(0).setAlpha(0);
+    this.scene.tweens.add({
+      targets: this.sprite,
+      scaleX: 1, scaleY: 1, alpha: 1,
+      duration: 350, ease: 'Sine.easeOut',
+      onComplete,
+    });
   }
 
   /** Show gold/juice carry dot above the worker's head. */
@@ -80,10 +116,18 @@ export class WorkerUnit extends Unit {
 
   override update(delta: number): void {
     super.update(delta);
+
+    // While inside the mine the sprite is alpha=0 at the node center.
+    // Suppress the shadow and carry-dot so they don't float over the node sprite.
+    const insideMine = this.miningState === 'harvesting' || this.miningState === 'exiting_mine';
+    if (insideMine) {
+      this.shadow.setVisible(false);
+    }
+
     // Sync carry-dot position with sprite
     if (this.carryDot) {
       this.carryDot.setPosition(this.sprite.x, this.sprite.y - 22);
-      this.carryDot.setVisible(this.sprite.visible && this.fogVisible);
+      this.carryDot.setVisible(!insideMine && this.sprite.visible && this.fogVisible);
     }
   }
 

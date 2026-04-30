@@ -285,7 +285,7 @@ export class Unit {
   private _lastStandAura: Phaser.GameObjects.Arc | null = null;
 
   // Visuals
-  private shadow: Phaser.GameObjects.Ellipse;
+  protected shadow: Phaser.GameObjects.Ellipse;
   private selectionCircle: Phaser.GameObjects.Ellipse;
   private healthBarBg: Phaser.GameObjects.Rectangle;
   private healthBar: Phaser.GameObjects.Rectangle;
@@ -1234,7 +1234,10 @@ export class Unit {
 
   private onDeath(): void {
     this.scene.events.emit('unit:died', this);
-    this.sprite.setAlpha(0.3).setTint(0x888888);
+    // Kill any in-progress sprite tweens (e.g. mine-entry animation) so they
+    // don't fight the death animation that follows.
+    this.scene.tweens.killTweensOf(this.sprite);
+    this.sprite.setScale(1).setAlpha(0.3).setTint(0x888888);
     this.shadow.setVisible(false);
     this.selectionCircle.setVisible(false);
     this.healthBarBg.setVisible(false);
