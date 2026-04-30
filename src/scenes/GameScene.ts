@@ -3843,8 +3843,12 @@ export class GameScene extends Phaser.Scene {
     // Drop any destroyed buildings from the selection first
     const before = this.selectedBuildings.length;
     this.selectedBuildings = this.selectedBuildings.filter(b => !b.isDestroyed());
-    if (this.selectedBuildings.length < before && this.selectedBuildings.length === 0) {
+    if (this.selectedBuildings.length < before) {
+      // Refresh production panel: hide if empty, otherwise show surviving buildings.
       this.productionPanel.hide();
+      if (this.selectedBuildings.length > 0) {
+        this.productionPanel.showMulti(this.selectedBuildings);
+      }
     }
     const currentIds = new Set(this.selectedBuildings.map(b => b.id));
 
