@@ -1966,7 +1966,11 @@ export class GameScene extends Phaser.Scene {
           u.animateExitMine(() => {
             if (u.miningState === 'exiting_mine') this.stopWorkerMining(u);
           });
-        } else {
+        } else if (u.miningState !== 'to_hq') {
+          // Skip workers already heading to HQ — they harvested the last batch and
+          // depositAndContinue will call stopWorkerMining after depositing.
+          // node:depleted fires 800ms after harvest() (inside the fade tween), so
+          // any worker that harvested before depletion is already in 'to_hq' state.
           this.stopWorkerMining(u);
         }
       });
