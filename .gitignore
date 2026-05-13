@@ -4,3 +4,5 @@ dist/
 .DS_Store
 .gstack/
 test-results/
+server/dist/
+dist-server/

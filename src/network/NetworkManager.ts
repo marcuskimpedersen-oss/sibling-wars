@@ -65,7 +65,8 @@ export class NetworkManager {
     return NetworkManager._instance;
   }
 
-  readonly serverUrl: string = window.location.origin.replace(/^http/, 'ws') + '/colyseus';
+  readonly serverUrl: string = import.meta.env.VITE_SERVER_WS_URL ?? (window.location.origin.replace(/^http/, 'ws') + '/colyseus');
+  private readonly httpUrl: string = import.meta.env.VITE_SERVER_HTTP_URL ?? '/colyseus';
 
   private client: Colyseus.Client;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -103,7 +104,7 @@ export class NetworkManager {
     this.playerName = opts.playerName ?? 'Player 2';
 
     // The server exposes a REST endpoint to resolve a room code → internal room ID
-    const resp = await fetch(`/colyseus/room-by-code/${code.toUpperCase()}`);
+    const resp = await fetch(`${this.httpUrl}/room-by-code/${code.toUpperCase()}`);
     if (!resp.ok) throw new Error(`Room "${code}" not found`);
     const { roomId } = (await resp.json()) as { roomId: string };
 

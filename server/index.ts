@@ -26,7 +26,7 @@ import { GameRoom } from './rooms/GameRoom';
 };
 
 const app = express();
-const port = 2567;
+const port = Number(process.env.PORT) || 2567;
 
 app.use(cors());
 app.use(express.json());
