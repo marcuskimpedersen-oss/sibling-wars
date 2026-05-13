@@ -61,5 +61,9 @@ app.get('/room-by-code/:code', (req, res) => {
 });
 
 gameServer.listen(port).then(() => {
-  console.log(`[Colyseus] Server listening on ws://localhost:${port}`);
+  console.log(`[Colyseus] Server listening on port ${port}`);
+  console.log(`[Colyseus] process.env.PORT = ${process.env.PORT}`);
+}).catch((err: Error) => {
+  console.error('[Colyseus] Failed to start:', err);
+  process.exit(1);
 });
