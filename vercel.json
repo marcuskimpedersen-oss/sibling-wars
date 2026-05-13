@@ -1,4 +1,10 @@
 {
   "buildCommand": "npx vite build",
-  "outputDirectory": "dist"
+  "outputDirectory": "dist",
+  "build": {
+    "env": {
+      "VITE_SERVER_WS_URL": "wss://sibling-wars-production.up.railway.app",
+      "VITE_SERVER_HTTP_URL": "https://sibling-wars-production.up.railway.app"
+    }
+  }
 }

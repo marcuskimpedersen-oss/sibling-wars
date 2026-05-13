@@ -224,8 +224,16 @@ export class LobbyScene extends Phaser.Scene {
         this.renderRoom(data.roomCode, data.isHost);
       });
     }).catch((err: unknown) => {
-      const msg = (err instanceof Error) ? err.message : String(err);
-      this.statusText.setText('Failed to create: ' + msg);
+      console.error('[Lobby] createRoom error:', err);
+      let msg: string;
+      if (err instanceof Error) {
+        msg = err.message;
+      } else if (typeof err === 'object' && err !== null) {
+        try { msg = JSON.stringify(err); } catch { msg = String(err); }
+      } else {
+        msg = String(err);
+      }
+      this.statusText.setText('Failed: ' + msg.substring(0, 80));
     });
   }
 
