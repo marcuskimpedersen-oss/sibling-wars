@@ -6,3 +6,4 @@ dist/
 test-results/
 server/dist/
 dist-server/
+.vercel

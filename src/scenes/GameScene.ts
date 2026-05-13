@@ -18,7 +18,7 @@ import { EnemyAI } from '@/ai/EnemyAI';
 import { getBuildingsForRace, getRaceTint, getBuildingDefById } from '@/buildings/definitions';
 import {
   Race, GOLD_POSITIONS, JUICE_POSITIONS, BASE_TILE, ENEMY_BASE_TILE, RACES,
-  RACE_COMBAT_STATS, RESOURCE_SNAP_RADIUS_TILES, TILE_SIZE, UNIT_SPEED, Difficulty, WinCondition, SURVIVAL_DURATION_MS,
+  RACE_COMBAT_STATS, WORKER_COMBAT_STATS, RESOURCE_SNAP_RADIUS_TILES, TILE_SIZE, UNIT_SPEED, Difficulty, WinCondition, SURVIVAL_DURATION_MS,
 } from '@/constants';
 import { CommandCard } from '@/ui/CommandCard';
 import { UnitPortraitPanel } from '@/ui/UnitPortraitPanel';
@@ -165,6 +165,7 @@ export class GameScene extends Phaser.Scene {
   private shadeSpires: Array<{
     building: Building;
     zoneCircle: Phaser.GameObjects.Arc;
+    zoneRing: Phaser.GameObjects.Arc;
     maxRadius: number;
   }> = [];
 
@@ -365,6 +366,7 @@ export class GameScene extends Phaser.Scene {
     hp: number; maxHp: number;
     gfx: Phaser.GameObjects.Graphics;
     pulseGfx: Phaser.GameObjects.Graphics;
+    pulseProxy: { alpha: number };
     hpLabel: Phaser.GameObjects.Text;
   }> = [];
   private _sanctuaryHealAccum = 0;
@@ -487,6 +489,8 @@ export class GameScene extends Phaser.Scene {
     this.spawnInitialUnits();
     if (!this.isMultiplayer) {
       this.enemyAI.initialize();
+    } else {
+      this.enemyAI.setEnabled(false);
     }
     this.showEnemyRaceBanner();
 
@@ -634,15 +638,24 @@ export class GameScene extends Phaser.Scene {
 
     // ── Supply refund + stats on player unit death ────────────────────────────
     this.unitManager.onUnitDied = (unit) => {
-      // Drones don't cost supply — skip decrement for them
+      // Drones and shadow clones don't cost supply — skip decrement for them
       const isDrone = unit.unitTypeId === 'drone';
-      if (!unit.isWorker && !isDrone) this.supplyUsed = Math.max(0, this.supplyUsed - 1);
-      if (!isDrone) this.stats.unitsLost++;
+      if (!unit.isWorker && !isDrone && !unit.isShadowClone) this.supplyUsed = Math.max(0, this.supplyUsed - 1);
+      if (!isDrone && !unit.isShadowClone) this.stats.unitsLost++;
       // Hero death: start 120s respawn timer
       if (unit.isHero) {
         this.activeHeroes.delete(this.race);
         this.heroRespawnTimers.set(this.race, 120000);
         this.showAlertBanner('♛ Hero has fallen! Respawn in 120s', '#ffaa44');
+      }
+      // Worker died while mining — reset miningState immediately so in-flight
+      // animateExitMine/animateEnterMine callbacks bail when they check miningState.
+      // tickWorkerMining can no longer do this because removeDeadUnits now deletes
+      // the unit from this.units before tickWorkerMining runs.
+      if (unit.isWorker) {
+        const worker = unit as WorkerUnit;
+        if (this.miningAssignments.has(worker.id)) this.stopWorkerMining(worker);
+        else if (worker.miningState !== 'idle') worker.miningState = 'idle';
       }
       // Kill feed: player unit lost
       const label = unit.unitTypeId.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -682,6 +695,7 @@ export class GameScene extends Phaser.Scene {
       if (!unit.isAlive()) return;
       const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
       this.pathfinder.findPath(fromX, fromY, tileX, tileY, (path) => {
+        if (!unit.isAlive()) return;
         if (path && path.length > 0) unit.setPath(path, undefined, false);
       });
     });
@@ -730,6 +744,22 @@ export class GameScene extends Phaser.Scene {
       });
     });
 
+    // ── Shadow Clone — spawn a decoy when the Phantom activates it ────────────
+    this.events.on('unit:shadowCloneCreated', (source: import('@/units/Unit').Unit) => {
+      if (!source.isAlive()) return;
+      const { tileX, tileY } = source.getCurrentTile();
+      const cloneStats = { maxHealth: 30, attackDamage: 0, attackRangePx: 0, attackCooldownMs: 99999 };
+      const clone = this.unitManager.spawnUnit(tileX, tileY, cloneStats, 'phantom');
+      clone.isShadowClone = true;
+      clone.canAttack = false;
+      clone.sprite.setTint(source.sprite.tintTopLeft);
+      clone.sprite.setAlpha(0.72);
+      // Expire after 8 seconds
+      this.time.delayedCall(8000, () => {
+        if (clone.isAlive()) clone.takeDamage(9999);
+      });
+    });
+
     // ── Unit stances (H / V / G keys) ─────────────────────────────────────────
     this.events.on('input:setStance', (stance: import('@/units/Unit').UnitStance) => {
       this.unitManager.setStanceForSelected(stance);
@@ -755,6 +785,7 @@ export class GameScene extends Phaser.Scene {
       else if (type === 'divinepulse')  this.spawnFloatingText(x, y - 22, '\u2665 Divine Pulse!', '#44ffaa');
       else if (type === 'holynova')     this.spawnFloatingText(x, y - 22, '\u2605 Holy Nova!',    '#ffffd0');
       else if (type === 'shadowstep')   this.spawnFloatingText(x, y - 22, '\u2727 Shadow Step!',  '#bb44ee');
+      else if (type === 'shadowclone')  this.spawnFloatingText(x, y - 22, '\u{1F465} Clone!',       '#bb44ee');
       else if (type === 'siege_deploy') this.spawnFloatingText(x, y - 22, '\u{1F6E1} Siege Mode!', '#ff8800');
       else if (type === 'siege_undeploy') this.spawnFloatingText(x, y - 22, '\u{1F6E1} Mobile Mode', '#ffcc44');
     });
@@ -1104,18 +1135,20 @@ export class GameScene extends Phaser.Scene {
         // Flash turret yellow/white
         const turretSprite = (nearest as any).sprite as Phaser.GameObjects.Image;
         if (turretSprite) {
+          const nearestBuilding = nearest as Building;
           let flash = true;
           const flashInterval = this.time.addEvent({
             delay: 150,
             repeat: 10,
             callback: () => {
+              if (nearestBuilding.isDestroyed()) { flashInterval.destroy(); return; }
               turretSprite.setTint(flash ? 0xffff44 : 0xffffff);
               flash = !flash;
             },
           });
           this.time.delayedCall(8000, () => {
             flashInterval.destroy();
-            turretSprite.clearTint();
+            if (!nearestBuilding.isDestroyed()) turretSprite.clearTint();
           });
         }
         const { x: bx, y: by } = (nearest as Building).getWorldCenter();
@@ -1190,7 +1223,7 @@ export class GameScene extends Phaser.Scene {
             this._warCryBuffs.set(ally.id, 8000);
             // Brief gold flash
             ally.sprite.setTint(0xffd700);
-            this.time.delayedCall(400, () => ally.sprite.clearTint());
+            this.time.delayedCall(400, () => { if (ally.isAlive()) ally.sprite.clearTint(); });
           });
         this.spawnFloatingText(ux, uy - 28, '📢 War Cry!', '#ffd700');
       });
@@ -1466,6 +1499,14 @@ export class GameScene extends Phaser.Scene {
       if (building.faction === 'player') this.stats.buildingsLost++;
       // Eject any garrisoned workers so they don't vanish permanently
       if (this.garrisonedWorkers.has(building.id)) this.ejectWorkersFromMine(building);
+      // In multiplayer: when we kill an enemy mirror building, notify the opponent so
+      // they destroy their own copy of that building on their screen.
+      // Strip 'remote_' prefix (used for mirrors placed via place_building) to recover
+      // the original building ID that exists on the opponent's screen.
+      if (this.isMultiplayer && building.faction === 'enemy' && !this.gameOver) {
+        const remoteId = building.id.startsWith('remote_') ? building.id.slice(7) : building.id;
+        NetworkManager.instance.sendCommand({ type: 'building_destroyed', buildingId: remoteId });
+      }
       if (building === this.playerHQ && !this.gameOver) this.endGame(false);
       if (building === this.enemyHQ && !this.gameOver && this.winCondition === 'hq') {
         // Blitzkrieg: destroy enemy HQ within 5 minutes
@@ -1498,7 +1539,7 @@ export class GameScene extends Phaser.Scene {
           this.lastPlayerActionMs = this.gameElapsedMs;
           // Sync worker to opponent
           if (this.isMultiplayer) {
-            NetworkManager.instance.sendCommand({ type: 'spawn_unit', unitId: worker.id, tx: tileX, ty: tileY, race: this.race });
+            NetworkManager.instance.sendCommand({ type: 'spawn_unit', unitId: worker.id, tx: tileX, ty: tileY, race: this.race, unitTypeId: 'worker', isWorker: true });
           }
         } else {
           const stats = unitDef.combatStats ?? RACE_COMBAT_STATS[this.race];
@@ -1509,7 +1550,17 @@ export class GameScene extends Phaser.Scene {
           // Sync new unit to opponent, plus relay its rally-point move so it walks there too
           if (this.isMultiplayer) {
             const net = NetworkManager.instance;
-            net.sendCommand({ type: 'spawn_unit', unitId: unit.id, tx: tileX, ty: tileY, race: this.race });
+            net.sendCommand({
+              type: 'spawn_unit',
+              unitId: unit.id,
+              tx: tileX,
+              ty: tileY,
+              race: this.race,
+              unitTypeId: unitDef.id,
+              isHero:      unitDef.isHero     ?? false,
+              isDetector:  unitDef.isDetector ?? false,
+              isStealthed: unitDef.id === 'shadow_reaper',
+            });
             const rally = building.getRallyTile();
             if (rally) {
               net.sendCommand({ type: 'move', unitMoves: [{ id: unit.id, tx: rally.tileX, ty: rally.tileY }] });
@@ -1616,6 +1667,7 @@ export class GameScene extends Phaser.Scene {
         const ty = Math.max(1, Math.min(38, target.tileY + Math.floor(i / 2)));
         const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
         this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
+          if (!unit.isAlive()) return;
           if (path && path.length > 0) unit.setPath(path);
         });
       });
@@ -1821,7 +1873,17 @@ export class GameScene extends Phaser.Scene {
         .filter(u => u.faction === 'player' && u.isAlive())
         .map(u => {
           const tile = u.getCurrentTile();
-          return { id: u.id, tileX: tile.tileX, tileY: tile.tileY, race: this.race, isWorker: u.isWorker };
+          return {
+            id:          u.id,
+            tileX:       tile.tileX,
+            tileY:       tile.tileY,
+            race:        this.race,
+            isWorker:    u.isWorker,
+            unitTypeId:  u.unitTypeId,
+            isHero:      u.isHero,
+            isDetector:  u.isDetector,
+            isStealthed: u.isStealthed && !u.isWorker,
+          };
         });
       net.sendCommand({ type: 'sync_units', units: myUnits });
     };
@@ -1836,6 +1898,7 @@ export class GameScene extends Phaser.Scene {
    * Unit IDs are prefixed with the sender's player index so we can look them up.
    */
   private handleRemoteCommand(cmd: CommandPayload): void {
+    if (this.gameOver) return; // discard late-arriving commands after game ends
     switch (cmd.type) {
       case 'move': {
         // New format: per-unit destinations with offsets already baked in
@@ -1851,6 +1914,7 @@ export class GameScene extends Phaser.Scene {
             if (!unit || !unit.isAlive()) return;
             const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
             this.pathfinder.findPath(fromX, fromY, destX, destY, (path) => {
+              if (!unit.isAlive()) return;
               if (path && path.length > 0) unit.setPath(path);
             });
           });
@@ -1860,6 +1924,7 @@ export class GameScene extends Phaser.Scene {
             if (!unit || !unit.isAlive()) return;
             const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
             this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
+              if (!unit.isAlive()) return;
               if (path && path.length > 0) unit.setPath(path);
             });
           });
@@ -1884,6 +1949,7 @@ export class GameScene extends Phaser.Scene {
           if (!unit || !unit.isAlive()) return;
           const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
           this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
+            if (!unit.isAlive()) return;
             if (path && path.length > 0) unit.setPath(path);
           });
         });
@@ -1891,12 +1957,28 @@ export class GameScene extends Phaser.Scene {
       }
       case 'spawn_unit': {
         // Remote player produced a unit from a building — create it as enemy faction
-        const tx = cmd.tx as number;
-        const ty = cmd.ty as number;
-        const unitId = (cmd.unitId as string) ?? '';
-        const race   = (cmd.race   as Race)   ?? this.mpOpponentRace;
+        const tx          = cmd.tx as number;
+        const ty          = cmd.ty as number;
+        const unitId      = (cmd.unitId    as string)  ?? '';
+        const race        = (cmd.race      as Race)    ?? this.mpOpponentRace;
+        const unitTypeId  = cmd.unitTypeId as string   | undefined;
+        const isWorker    = cmd.isWorker   as boolean  | undefined;
+        const isHero      = cmd.isHero     as boolean  | undefined;
+        const isDetector  = cmd.isDetector as boolean  | undefined;
+        const isStealthed = cmd.isStealthed as boolean | undefined;
+        const stats       = isWorker ? WORKER_COMBAT_STATS : undefined;
         if (unitId) {
-          this.unitManager.spawnEnemyUnitWithId(unitId, tx, ty, race);
+          const unit = this.unitManager.spawnEnemyUnitWithId(unitId, tx, ty, race, stats);
+          if (unit) {
+            if (unitTypeId)  unit.unitTypeId = unitTypeId;
+            // unitTypeId must be set before setAsHero() so void_walker cloaking triggers correctly
+            if (isHero)      unit.setAsHero();
+            if (isDetector)  { unit.isDetector = true; unit.buildDetectorRing(); }
+            if (isStealthed) {
+              unit.isStealthed = true;
+              if (unitTypeId === 'shadow_reaper') (unit as any).isUnseenUnit = true;
+            }
+          }
         } else {
           this.unitManager.spawnEnemyUnit(tx, ty, undefined, race);
         }
@@ -1905,9 +1987,23 @@ export class GameScene extends Phaser.Scene {
       case 'sync_units': {
         // Opponent is sending their unit positions — create/update enemy versions.
         // spawnEnemyUnitWithId deduplicates so retries are safe.
-        const units = cmd.units as Array<{ id: string; tileX: number; tileY: number; race: Race; isWorker?: boolean }>;
+        const units = cmd.units as Array<{
+          id: string; tileX: number; tileY: number; race: Race;
+          isWorker?: boolean; unitTypeId?: string;
+          isHero?: boolean; isDetector?: boolean; isStealthed?: boolean;
+        }>;
         units?.forEach(u => {
-          this.unitManager.spawnEnemyUnitWithId(u.id, u.tileX, u.tileY, u.race);
+          const stats = u.isWorker ? WORKER_COMBAT_STATS : undefined;
+          const unit  = this.unitManager.spawnEnemyUnitWithId(u.id, u.tileX, u.tileY, u.race, stats);
+          if (unit) {
+            if (u.unitTypeId && !unit.unitTypeId) unit.unitTypeId = u.unitTypeId;
+            if (u.isHero     && !unit.isHero)    unit.setAsHero();
+            if (u.isDetector && !unit.isDetector) { unit.isDetector = true; unit.buildDetectorRing(); }
+            if (u.isStealthed && !unit.isStealthed) {
+              unit.isStealthed = true;
+              if (u.unitTypeId === 'shadow_reaper') (unit as any).isUnseenUnit = true;
+            }
+          }
         });
         break;
       }
@@ -1941,13 +2037,43 @@ export class GameScene extends Phaser.Scene {
       case 'place_building': {
         // Opponent placed a building — create an enemy-faction mirror on our screen
         // so our units can attack it and the pathfinder blocks those tiles correctly.
-        const defId = cmd.defId as string;
-        const tx    = cmd.tx as number;
-        const ty    = cmd.ty as number;
-        const race  = (cmd.race as Race) ?? this.mpOpponentRace;
-        const def   = getBuildingDefById(defId, race);
+        const defId      = cmd.defId as string;
+        const tx         = cmd.tx as number;
+        const ty         = cmd.ty as number;
+        const race       = (cmd.race as Race) ?? this.mpOpponentRace;
+        const def        = getBuildingDefById(defId, race);
+        const buildingId = cmd.buildingId as string | undefined;
+        // Prefix with 'remote_' so the mirror ID never collides with our own building IDs.
+        const forceId    = buildingId ? `remote_${buildingId}` : undefined;
         if (def) {
-          this.buildingManager.placeBuilding(def, tx, ty, true, 'enemy');
+          this.buildingManager.placeBuilding(def, tx, ty, true, 'enemy', forceId);
+        }
+        break;
+      }
+      case 'building_destroyed': {
+        // Opponent destroyed one of our buildings — kill it on our screen too.
+        const rawId   = cmd.buildingId as string | undefined;
+        if (!rawId) break;
+        const building = this.buildingManager.getBuildingById(rawId);
+        if (building && !building.isDestroyed()) {
+          building.takeDamage(building.def.maxHealth * 10);
+        }
+        break;
+      }
+      case 'upgrade': {
+        // Opponent researched an upgrade — apply the bonus to their mirror units/buildings.
+        const upgradeType = cmd.upgradeType as 'attack' | 'armor' | 'bldghp' | 'speed';
+        const delta       = (cmd.delta as number) ?? 3;
+        if (upgradeType === 'attack') {
+          this.unitManager.applyUpgradeToEnemies(delta, 0);
+          this.events.emit('enemy:upgraded', 'attack', Math.round(this.unitManager.enemyAttackBonus / 3));
+        } else if (upgradeType === 'armor') {
+          this.unitManager.applyUpgradeToEnemies(0, delta);
+          this.events.emit('enemy:upgraded', 'armor', Math.round(this.unitManager.enemyArmorBonus / 3));
+        } else if (upgradeType === 'bldghp') {
+          this.buildingManager.applyArmorUpgradeToEnemies(delta);
+        } else if (upgradeType === 'speed') {
+          this.unitManager.applyUpgradeToEnemies(0, 0, delta);
         }
         break;
       }
@@ -2127,7 +2253,7 @@ export class GameScene extends Phaser.Scene {
       }
     }
     if (b && this.isMultiplayer) {
-      NetworkManager.instance.sendCommand({ type: 'place_building', defId: def.id, tx, ty, race: this.race });
+      NetworkManager.instance.sendCommand({ type: 'place_building', defId: def.id, tx, ty, race: this.race, buildingId: b.id });
     }
     return b;
   }
@@ -2162,12 +2288,30 @@ export class GameScene extends Phaser.Scene {
     const progressBg = this.add.rectangle(worldX, worldY + h / 2 + 8, w, 5, 0x222222).setDepth(6);
     const progressBar = this.add.rectangle(worldX - w / 2, worldY + h / 2 + 8, 0, 5, 0xffcc00).setOrigin(0, 0.5).setDepth(6);
 
-    const cleanup = () => { site.destroy(); label.destroy(); progressBg.destroy(); progressBar.destroy(); };
+    let constructionDone = false;
+    let siteCleaned = false;
+    let constructionTicker: Phaser.Time.TimerEvent | null = null;
+    const cleanup = () => {
+      if (siteCleaned) return;
+      siteCleaned = true;
+      // Cancel the build ticker so the building isn't placed for free after a worker-death refund
+      if (constructionTicker) { constructionTicker.destroy(); constructionTicker = null; }
+      site.destroy(); label.destroy(); progressBg.destroy(); progressBar.destroy();
+      this.events.off('unit:died', onWorkerDied);
+    };
+
+    // If the worker dies in transit (path or walk), refund gold and clear the site UI.
+    const onWorkerDied = (unit: import('@/units/Unit').Unit) => {
+      if (unit !== worker || constructionDone) return;
+      this.resources.addGold(def.goldCost);
+      cleanup();
+    };
+    this.events.on('unit:died', onWorkerDied);
 
     const { tileX, tileY } = worker.getCurrentTile();
     this.pathfinder.findPath(tileX, tileY, tx, ty, (path) => {
-      if (!path || path.length === 0) {
-        this.resources.addGold(def.goldCost); // refund
+      if (!worker.isAlive() || !path || path.length === 0) {
+        if (worker.isAlive()) this.resources.addGold(def.goldCost); // refund only if alive (death handler refunds otherwise)
         cleanup();
         return;
       }
@@ -2176,13 +2320,13 @@ export class GameScene extends Phaser.Scene {
         label.setText('Building…');
         const buildMs = 5000 + Math.random() * 5000;
         const startTime = this.time.now;
-        const ticker = this.time.addEvent({
+        constructionTicker = this.time.addEvent({
           delay: 50, loop: true,
           callback: () => {
             const elapsed = this.time.now - startTime;
             progressBar.width = Math.min(elapsed / buildMs, 1) * w;
             if (elapsed >= buildMs) {
-              ticker.destroy();
+              constructionDone = true;
               cleanup();
               const built = this.placeAndLinkBuilding(def, tx, ty, true); // free — gold already spent
               if (built) {
@@ -2207,8 +2351,10 @@ export class GameScene extends Phaser.Scene {
       }
       const { tileX, tileY } = worker.getCurrentTile();
       this.pathfinder.findPath(tileX, tileY, mine.tileX + 1, mine.tileY + 1, (path) => {
-        if (!path || path.length === 0) return;
+        if (!worker.isAlive() || mine.isDestroyed() || !path || path.length === 0) return;
         worker.setPath(path, () => {
+          // Mine may have been destroyed while the worker was walking to it
+          if (mine.isDestroyed()) return;
           if (mine.garrisonWorker()) {
             worker.isGarrisoned = true;
             worker.setSelected(false);
@@ -2375,6 +2521,9 @@ export class GameScene extends Phaser.Scene {
     } else {
       this.unitManager.armorBonus += 3;
       this.unitManager.applyUpgradeToAll(0, 3);
+    }
+    if (this.isMultiplayer) {
+      NetworkManager.instance.sendCommand({ type: 'upgrade', upgradeType: isAttack ? 'attack' : 'armor', delta: 3 });
     }
     const { x, y } = this.playerHQ?.getWorldCenter() ?? { x: 400, y: 300 };
     this.events.emit('sound:upgradeComplete', x, y);
@@ -2645,8 +2794,8 @@ export class GameScene extends Phaser.Scene {
       // Find the unit (use getAllUnits since worker could be alive but moving)
       const unit = this.unitManager.getAllUnits().find(u => u.id === workerId);
       if (!unit || !unit.isAlive()) {
-        // Worker died — remove assignment; reset state so any in-flight tween callbacks bail
-        if (unit) (unit as WorkerUnit).miningState = 'idle';
+        // Worker died — onUnitDied already called stopWorkerMining/reset miningState.
+        // This branch is a safety net for any stale assignments that slipped through.
         node.removeWorker();
         this.miningAssignments.delete(workerId);
         continue;
@@ -2730,6 +2879,7 @@ export class GameScene extends Phaser.Scene {
     if (!rally) return;
     const { tileX, tileY } = unit.getCurrentTile();
     this.pathfinder.findPath(tileX, tileY, rally.tileX, rally.tileY, (path) => {
+      if (!unit.isAlive()) return;
       if (path && path.length > 0) unit.setPath(path);
     });
   }
@@ -2765,6 +2915,7 @@ export class GameScene extends Phaser.Scene {
 
     const { tileX, tileY } = worker.getCurrentTile();
     this.pathfinder.findPath(tileX, tileY, rally.tileX, rally.tileY, (path) => {
+      if (!worker.isAlive()) return;
       if (!path || path.length === 0) { onArrived(); return; }
       worker.setPath(path, onArrived);
     });
@@ -2814,6 +2965,7 @@ export class GameScene extends Phaser.Scene {
         const destTileY = nearest.tileY + nearest.def.tileHeight + 1;
         const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
         this.pathfinder.findPath(fromX, fromY, destTileX, destTileY, (path) => {
+          if (!unit.isAlive()) return;
           if (path && path.length > 0) unit.setPath(path);
         });
         // Floating label so the player sees the routing
@@ -2965,11 +3117,12 @@ export class GameScene extends Phaser.Scene {
         onComplete: () => beam.destroy(),
       });
 
-      // Deal damage
-      const dealt = Math.max(1, dmg - (nearest.armor ?? 0));
-      const alive = !nearest.takeDamage(dealt);
+      // Deal damage — let takeDamage() apply armor/shields; don't pre-subtract armor
+      const hpBefore = nearest.health;
+      const alive = !nearest.takeDamage(dmg);
       if (alive) {
-        this.spawnFloatingText(ex, ey - 16, `-${dealt}`, isOvercharged ? '#ffff44' : '#88ccff');
+        const actualDealt = Math.round(hpBefore - nearest.health);
+        this.spawnFloatingText(ex, ey - 16, `-${actualDealt}`, isOvercharged ? '#ffff44' : '#88ccff');
       }
     }
   }
@@ -3024,15 +3177,15 @@ export class GameScene extends Phaser.Scene {
       prevOnDestroyed?.();
       portalGfx.destroy();
       labelText.destroy();
-      // Unlink partner
-      const partner = this._voidGates.find(g => g.linkedIdx === myIdx);
+      // Remove from list — find actual index first (myIdx is stale after splices)
+      const idx = this._voidGates.indexOf(entry);
+      if (idx !== -1) this._voidGates.splice(idx, 1);
+      // Unlink partner using the real pre-splice index
+      const partner = idx !== -1 ? this._voidGates.find(g => g.linkedIdx === idx) : null;
       if (partner) {
         partner.linkedIdx = null;
         partner.labelText.setText('⬡ Unlinked');
       }
-      // Remove from list
-      const idx = this._voidGates.indexOf(entry);
-      if (idx !== -1) this._voidGates.splice(idx, 1);
       // Re-index remaining gates so linkedIdx values stay consistent
       this._voidGates.forEach((g, i) => {
         if (g.linkedIdx !== null && g.linkedIdx >= idx) {
@@ -3575,7 +3728,7 @@ export class GameScene extends Phaser.Scene {
     this.sanctuaryZones.push({
       worldX: cx, worldY: cy, radius: R,
       hp: this.SANCTUARY_MAX_HP, maxHp: this.SANCTUARY_MAX_HP,
-      gfx, pulseGfx, hpLabel,
+      gfx, pulseGfx, pulseProxy, hpLabel,
     });
     this.spawnFloatingText(cx, cy - 24, '\u2728 Sanctuary Zone', '#ffd700');
   }
@@ -3614,7 +3767,8 @@ export class GameScene extends Phaser.Scene {
       z.hpLabel.setText(`\u2665 ${Math.max(0, Math.ceil(z.hp))}`);
 
       if (z.hp <= 0) {
-        this.tweens.killTweensOf(z.pulseGfx);
+        // Kill via proxy (tween targets pulseProxy, not pulseGfx — killTweensOf(pulseGfx) is a no-op)
+        this.tweens.killTweensOf(z.pulseProxy);
         z.gfx.destroy();
         z.pulseGfx.destroy();
         z.hpLabel.destroy();
@@ -4816,7 +4970,7 @@ export class GameScene extends Phaser.Scene {
       ease: 'Sine.easeInOut',
     });
 
-    this.shadeSpires.push({ building, zoneCircle: zone, maxRadius: MAX_RADIUS });
+    this.shadeSpires.push({ building, zoneCircle: zone, zoneRing: ring, maxRadius: MAX_RADIUS });
     this.spawnFloatingText(x, y - 40, '🌑 Shade Spire active', '#bb44ee');
   }
 
@@ -4834,7 +4988,10 @@ export class GameScene extends Phaser.Scene {
     // Prune destroyed spires and apply zone effects
     this.shadeSpires = this.shadeSpires.filter(spire => {
       if (spire.building.isDestroyed()) {
+        this.tweens.killTweensOf(spire.zoneCircle);
+        this.tweens.killTweensOf(spire.zoneRing);
         spire.zoneCircle.destroy();
+        spire.zoneRing.destroy();
         return false;
       }
 
@@ -6120,11 +6277,13 @@ export class GameScene extends Phaser.Scene {
     if (id.includes('attack')) {
       this.unitManager.attackBonus += 3;
       this.unitManager.applyUpgradeToAll(3, 0);
+      if (this.isMultiplayer) NetworkManager.instance.sendCommand({ type: 'upgrade', upgradeType: 'attack', delta: 3 });
       const { x, y } = this.playerHQ?.getWorldCenter() ?? { x: 400, y: 300 };
       this.spawnFloatingText(x, y - 40, `⚔ Attack +3 (Tier ${tier})`, '#ffaa44');
     } else if (id.includes('armor')) {
       this.unitManager.armorBonus += 3;
       this.unitManager.applyUpgradeToAll(0, 3);
+      if (this.isMultiplayer) NetworkManager.instance.sendCommand({ type: 'upgrade', upgradeType: 'armor', delta: 3 });
       const { x, y } = this.playerHQ?.getWorldCenter() ?? { x: 400, y: 300 };
       this.spawnFloatingText(x, y - 40, `🛡 Armor +3 (Tier ${tier})`, '#44aaff');
     } else if (id.includes('speed')) {
@@ -6137,6 +6296,7 @@ export class GameScene extends Phaser.Scene {
         (u as any)._baseSpeed = ((u as any)._baseSpeed ?? 150) + speedAdd;
       });
       this.unitManager.speedBonus += speedAdd;
+      if (this.isMultiplayer) NetworkManager.instance.sendCommand({ type: 'upgrade', upgradeType: 'speed', delta: speedAdd });
       const { x, y } = this.playerHQ?.getWorldCenter() ?? { x: 400, y: 300 };
       this.spawnFloatingText(x, y - 40, `🏃 Speed +20% (Tier ${tier})`, '#44ffcc');
     } else if (id.includes('bldghp')) {
@@ -6145,6 +6305,7 @@ export class GameScene extends Phaser.Scene {
       this.buildingManager.getBuildings()
         .filter(b => b.faction === 'player' && !b.isDestroyed())
         .forEach(b => { b.armorBonus = (b.armorBonus ?? 0) + 2; });
+      if (this.isMultiplayer) NetworkManager.instance.sendCommand({ type: 'upgrade', upgradeType: 'bldghp', delta: 2 });
       const { x, y } = this.playerHQ?.getWorldCenter() ?? { x: 400, y: 300 };
       this.spawnFloatingText(x, y - 40, `🏛 Building Armor +2 (Tier ${tier})`, '#ffccaa');
     }

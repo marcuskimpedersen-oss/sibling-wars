@@ -38,11 +38,17 @@ export class UnitManager {
   playerRace: Race = 'architects';
   /** Prepended to every auto-generated unit ID to avoid cross-player conflicts in multiplayer. */
   unitIdPrefix: string = '';
+  /** IDs of enemy units that died locally — prevents sync_units from resurrecting them. */
+  private _deadEnemyIds = new Set<string>();
 
   attackBonus: number = 0;
   armorBonus: number = 0;
   /** Cumulative speed bonus from global upgrades (pixels/second added to UNIT_SPEED). */
   speedBonus: number = 0;
+  /** Opponent's cumulative attack/armor/speed upgrades — applied to enemy mirror units. */
+  enemyAttackBonus: number = 0;
+  enemyArmorBonus: number = 0;
+  enemySpeedBonus: number = 0;
 
   /** World-space repellers for environmental obstacles (rocks, trees, water). */
   private obstacleRepellers: Array<{ x: number; y: number; radius: number }> = [];
@@ -97,6 +103,22 @@ export class UnitManager {
     });
   }
 
+  applyUpgradeToEnemies(attackDelta: number, armorDelta: number, speedDelta = 0): void {
+    this.enemyAttackBonus += attackDelta;
+    this.enemyArmorBonus  += armorDelta;
+    this.enemySpeedBonus  += speedDelta;
+    this.units.forEach(u => {
+      if (u.faction === 'enemy' && u.isAlive() && !u.isWorker) {
+        u.attackDamage += attackDelta;
+        u.armor        += armorDelta;
+        if (speedDelta !== 0) {
+          (u as any).speed      = ((u as any).speed      ?? 150) + speedDelta;
+          (u as any)._baseSpeed = ((u as any)._baseSpeed ?? 150) + speedDelta;
+        }
+      }
+    });
+  }
+
   spawnWorker(tileX: number, tileY: number): WorkerUnit {
     const id = `${this.unitIdPrefix}worker_${this.nextId++}`;
     const worker = new WorkerUnit(this.scene, tileX, tileY, id);
@@ -122,10 +144,29 @@ export class UnitManager {
 
   /** Spawn an enemy unit with a caller-supplied ID (used for multiplayer remote unit sync). */
   spawnEnemyUnitWithId(id: string, tileX: number, tileY: number, race: Race, stats?: CombatStats): Unit {
-    // Dedup: if a unit with this ID already exists, return the existing one
+    // Dedup: if a unit with this ID already exists, return the existing one.
+    // Also block resurrection — once an enemy unit dies locally it stays dead
+    // even if a sync_units retry from the opponent arrives for the same ID.
+    if (this._deadEnemyIds.has(id)) return null!;
     const existing = this.units.get(id);
     if (existing) return existing;
-    const unit = new Unit(this.scene, tileX, tileY, id, 'enemy_unit', 'enemy', stats ?? RACE_COMBAT_STATS[race] ?? ENEMY_COMBAT_STATS);
+    // If explicit stats are provided (e.g. WORKER_COMBAT_STATS), use them as-is.
+    // For regular combat units (stats=undefined), apply the opponent's accumulated bonuses.
+    let combatStats: CombatStats;
+    if (stats) {
+      combatStats = stats;
+    } else {
+      const base = RACE_COMBAT_STATS[race] ?? ENEMY_COMBAT_STATS;
+      combatStats = { ...base, attackDamage: base.attackDamage + this.enemyAttackBonus };
+    }
+    const unit = new Unit(this.scene, tileX, tileY, id, 'enemy_unit', 'enemy', combatStats);
+    if (!stats) {
+      unit.armor += this.enemyArmorBonus;
+      if (this.enemySpeedBonus !== 0) {
+        (unit as any).speed      = ((unit as any).speed      ?? 150) + this.enemySpeedBonus;
+        (unit as any)._baseSpeed = ((unit as any)._baseSpeed ?? 150) + this.enemySpeedBonus;
+      }
+    }
     unit.sprite.setTint(getRaceTint(race));
     unit.unitRace = race;
     this.units.set(id, unit);
@@ -137,14 +178,15 @@ export class UnitManager {
     this.units.forEach((unit, id) => {
       if (!unit.isAlive()) {
         dead.push(unit);
+        // Remove from the live map immediately — prevents onUnitDied from firing
+        // again on every subsequent frame while the death animation plays (~42 frames
+        // at 60 fps before the old 700 ms delayedCall would have fired).
+        this.units.delete(id);
         this.selectedUnits.delete(unit);
         if (unit.faction === 'player') this.onUnitDied?.(unit);
-        else if (unit.faction === 'enemy') this.onEnemyDied?.(unit);
-        // Delay actual removal to let death animation play
-        this.scene.time.delayedCall(700, () => {
-          unit.destroy();
-          this.units.delete(id);
-        });
+        else if (unit.faction === 'enemy') { this._deadEnemyIds.add(id); this.onEnemyDied?.(unit); }
+        // Defer Phaser GameObject destruction so the death animation can finish.
+        this.scene.time.delayedCall(700, () => unit.destroy());
       }
     });
     return dead;
@@ -322,6 +364,9 @@ export class UnitManager {
       } else if (u.canActivateShieldWall()) {
         u.activateShieldWall();
         this.scene.events.emit('unit:abilityActivated', u, 'shieldwall');
+      } else if (u.canActivateShadowClone()) {
+        u.activateShadowClone();
+        this.scene.events.emit('unit:abilityActivated', u, 'shadowclone');
       }
     });
   }
@@ -369,6 +414,14 @@ export class UnitManager {
           ready: u.canActivateShieldWall(),
           active: u.shieldWallActive,
           cooldownSec: Math.ceil(u.shieldWallCooldownRemaining / 1000),
+        };
+      }
+      if (u.unitTypeId === 'phantom') {
+        return {
+          type: 'Shadow Clone',
+          ready: u.canActivateShadowClone(),
+          active: false,
+          cooldownSec: Math.ceil(u.shadowCloneCooldownRemaining / 1000),
         };
       }
     }
@@ -640,7 +693,10 @@ export class UnitManager {
   /** Stop all selected units in place (clears move/attack orders). */
   stopSelectedUnits(): void {
     for (const u of this.selectedUnits) {
-      if (u.isAlive()) u.stopMoving();
+      if (u.isAlive()) {
+        u.stopMoving();
+        u.moveDest = null; // prevent endAttack() from resuming a move the player explicitly cancelled
+      }
     }
   }
 

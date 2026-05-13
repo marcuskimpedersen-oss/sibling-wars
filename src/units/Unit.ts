@@ -1252,8 +1252,8 @@ export class Unit {
     }
 
     // Clean up ability visuals
-    if (this.overchargeGlow) { this.overchargeGlow.destroy(); this.overchargeGlow = null; }
-    if (this.shieldRing) { this.shieldRing.destroy(); this.shieldRing = null; }
+    if (this.overchargeGlow) { this.scene.tweens.killTweensOf(this.overchargeGlow); this.overchargeGlow.destroy(); this.overchargeGlow = null; }
+    if (this.shieldRing) { this.scene.tweens.killTweensOf(this.shieldRing); this.shieldRing.destroy(); this.shieldRing = null; }
     if (this._veterancyStar) { this._veterancyStar.destroy(); this._veterancyStar = null; }
     if (this._phaseShiftRing) { this.scene.tweens.killTweensOf(this._phaseShiftRing); this._phaseShiftRing.destroy(); this._phaseShiftRing = null; }
     this.phaseShiftActive = false;
@@ -1264,6 +1264,15 @@ export class Unit {
     if (this._crownLabel) { this._crownLabel.destroy(); this._crownLabel = null; }
     if (this._heroInvulnRing) { this.scene.tweens.killTweensOf(this._heroInvulnRing); this._heroInvulnRing.destroy(); this._heroInvulnRing = null; }
     this.heroInvulnActive = false;
+    // Bulwark fortify visuals leak if not cleaned up — update() returns early for dead units
+    if (this.fortifyActive) this.deactivateFortify();
+    if (this._fortifiedGroundRing) { this._fortifiedGroundRing.destroy(); this._fortifiedGroundRing = null; this._fortifiedGroundActive = false; }
+    // On Fire glow: update() returns early for dead units so deactivateOnFire() never fires
+    if (this.onFireGlow) { this.scene.tweens.killTweensOf(this.onFireGlow); this.onFireGlow.destroy(); this.onFireGlow = null; }
+    this.onFireActive = false;
+    // Last Stand aura: update() returns early for dead units so cleanup must happen here
+    if (this._lastStandAura) { this.scene.tweens.killTweensOf(this._lastStandAura); this._lastStandAura.destroy(); this._lastStandAura = null; }
+    this.lastStandActive = false;
 
     // ── Death animation variant (random) ─────────────────────────────────────
     const variant = Math.floor(Math.random() * 3);
@@ -1510,22 +1519,15 @@ export class Unit {
       if (!this._lastStandAura) {
         this._lastStandAura = this.scene.add.arc(
           this.sprite.x, this.sprite.y, 18, 0, 360, false, 0xff2200, 0
-        ).setDepth(13).setStrokeStyle(3, 0xff0000, 1);
-        const proxy = { alpha: 0.0, scale: 1.0 };
+        ).setDepth(13).setStrokeStyle(3, 0xff0000, 1).setAlpha(0);
         this.scene.tweens.add({
-          targets: proxy,
+          targets: this._lastStandAura,
           alpha: 0.4,
           scale: 1.3,
           duration: 180,
           yoyo: true,
           repeat: -1,
           ease: 'Sine.easeInOut',
-          onUpdate: () => {
-            if (this._lastStandAura) {
-              this._lastStandAura.setAlpha(proxy.alpha);
-              this._lastStandAura.setScale(proxy.scale);
-            }
-          },
         });
       }
     } else if (this.lastStandActive && hpRatio >= lastStandThreshold) {
@@ -2124,15 +2126,22 @@ export class Unit {
     this.healthBar.destroy();
     this.xpBarBg.destroy();
     this.xpBar.destroy();
-    this.overchargeGlow?.destroy();
-    this.shieldRing?.destroy();
+    if (this.overchargeGlow) { this.scene.tweens.killTweensOf(this.overchargeGlow); this.overchargeGlow.destroy(); }
+    if (this.shieldRing) { this.scene.tweens.killTweensOf(this.shieldRing); this.shieldRing.destroy(); }
     this._veterancyStar?.destroy();
-    this._siegeTransitionGfx?.destroy();
+    if (this._siegeTransitionGfx) { this.scene.tweens.killTweensOf(this._siegeTransitionGfx); this._siegeTransitionGfx.destroy(); }
+    if (this.stasisGfx) { this.scene.tweens.killTweensOf(this.stasisGfx); this.stasisGfx.destroy(); }
+    if (this._phaseShiftRing) { this.scene.tweens.killTweensOf(this._phaseShiftRing); this._phaseShiftRing.destroy(); }
+    if (this._detectorRing) { this.scene.tweens.killTweensOf(this._detectorRing); this._detectorRing.destroy(); }
+    this._detectedOutline?.destroy();
+    this._crownLabel?.destroy();
+    if (this._heroInvulnRing) { this.scene.tweens.killTweensOf(this._heroInvulnRing); this._heroInvulnRing.destroy(); }
     this.waypointGfx.destroy();
     this._upgradeBadges?.destroy();
     this._controlGroupBadge?.destroy();
     this._fortifiedGroundRing?.destroy();
     if (this._woundedTween) { this.scene.tweens.remove(this._woundedTween); }
     if (this.onFireGlow) { this.scene.tweens.killTweensOf(this.onFireGlow); this.onFireGlow.destroy(); }
+    if (this._lastStandAura) { this.scene.tweens.killTweensOf(this._lastStandAura); this._lastStandAura.destroy(); }
   }
 }

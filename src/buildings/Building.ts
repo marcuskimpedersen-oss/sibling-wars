@@ -36,6 +36,7 @@ export class Building {
   garrisonCount: number = 0;
   readonly garrisonMax: number = 0;
   private garrisonLabel: Phaser.GameObjects.Text | null = null;
+  private passiveLabelObj: Phaser.GameObjects.Text | null = null;
 
   // Shrine ability cooldown
   private shrineAbilityCooldownRemaining: number = 0;
@@ -84,6 +85,8 @@ export class Building {
   private unpoweredLabel: Phaser.GameObjects.Text | null = null;
   /** Pulsing ring drawn for Pylon buildings (and architects HQ). */
   private pylonRingGfx: Phaser.GameObjects.Graphics | null = null;
+  /** Proxy target for the pylon ring tween — must be stored to kill the infinite tween on destruction. */
+  private _pylonRingProxy: { alpha: number } | null = null;
 
   onUnitProduced: ((unitDef: ProducedUnitDef, spawnTileX: number, spawnTileY: number) => void) | null = null;
   onDestroyed: (() => void) | null = null;
@@ -168,7 +171,7 @@ export class Building {
 
     // Passive label
     if (def.passiveLabel) {
-      scene.add.text(worldX, worldY - spriteH / 2 - 14, def.passiveLabel, {
+      this.passiveLabelObj = scene.add.text(worldX, worldY - spriteH / 2 - 14, def.passiveLabel, {
         fontSize: '9px', color: '#ffee88', stroke: '#000', strokeThickness: 2,
       }).setOrigin(0.5).setDepth(11);
     }
@@ -208,8 +211,9 @@ export class Building {
         ringGfx.fillCircle(worldX, worldY, range);
       };
       drawRing(0.25);
+      const pylonProxy = { alpha: 0.25 };
       scene.tweens.add({
-        targets: { alpha: 0.25 },
+        targets: pylonProxy,
         alpha: 0.6,
         duration: 1600,
         yoyo: true,
@@ -218,6 +222,7 @@ export class Building {
         onUpdate: (tween) => { drawRing(tween.getValue() as number); },
       });
       this.pylonRingGfx = ringGfx;
+      this._pylonRingProxy = pylonProxy;
     }
 
     // ⚡ unpowered indicator (Architects buildings with requiresPower)
@@ -451,6 +456,20 @@ export class Building {
 
       this.rallyMarker?.destroy();
       this.rallyMarker = null;
+      this.passiveLabelObj?.destroy();
+      this.passiveLabelObj = null;
+      // Clean up any in-progress construction visuals
+      if (this.constructionSite) { this.constructionSite.destroy(); this.constructionSite = null; }
+      if (this.constructionBar) { this.constructionBar.destroy(); this.constructionBar = null; }
+      if (this.constructionBarBg) { this.constructionBarBg.destroy(); this.constructionBarBg = null; }
+      // Kill the infinite pylon ring tween (targets proxy, not ringGfx — must kill via proxy)
+      if (this._pylonRingProxy) { this.scene.tweens.killTweensOf(this._pylonRingProxy); this._pylonRingProxy = null; }
+      if (this.pylonRingGfx) { this.pylonRingGfx.destroy(); this.pylonRingGfx = null; }
+      // Destroy any lingering "HACKED" overlay so it doesn't float after death
+      if (this.hackedVisuals.length > 0) {
+        this.hackedVisuals.forEach(v => (v as Phaser.GameObjects.GameObject & { destroy(): void }).destroy());
+        this.hackedVisuals = [];
+      }
       this.onDestroyed?.();
       return true;
     }

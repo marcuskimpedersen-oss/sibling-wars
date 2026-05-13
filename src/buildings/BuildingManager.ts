@@ -22,11 +22,11 @@ export class BuildingManager {
     this.resources = resources;
   }
 
-  placeBuilding(def: BuildingDef, tileX: number, tileY: number, free = false, faction: Faction = 'player'): Building | null {
+  placeBuilding(def: BuildingDef, tileX: number, tileY: number, free = false, faction: Faction = 'player', forceId?: string): Building | null {
     if (!this.isValidPlacement(def, tileX, tileY)) return null;
     if (!free && faction === 'player' && !this.resources.spendGold(def.goldCost)) return null;
 
-    const id = `building_${this.nextId++}`;
+    const id = forceId ?? `building_${this.nextId++}`;
     const building = new Building(this.scene, def, tileX, tileY, id, faction);
     building.onUnitProduced = (unitDef, spawnX, spawnY) => {
       this.onUnitProduced?.(unitDef, spawnX, spawnY, faction, building);
@@ -71,6 +71,10 @@ export class BuildingManager {
     return Array.from(this.buildings.values()).filter(b => !b.isDestroyed());
   }
 
+  getBuildingById(id: string): Building | undefined {
+    return this.buildings.get(id);
+  }
+
   isTileOccupied(tileX: number, tileY: number): boolean {
     return this.occupiedTiles.has(`${tileX},${tileY}`);
   }
@@ -81,7 +85,15 @@ export class BuildingManager {
 
   getTotalSupply(): number {
     let total = 0;
-    this.buildings.forEach(b => { if (!b.isDestroyed()) total += b.def.supplyProvided; });
+    this.buildings.forEach(b => { if (!b.isDestroyed() && b.faction === 'player') total += b.def.supplyProvided; });
     return total;
+  }
+
+  applyArmorUpgradeToEnemies(armorDelta: number): void {
+    this.buildings.forEach(b => {
+      if (b.faction === 'enemy' && !b.isDestroyed()) {
+        b.armorBonus = (b.armorBonus ?? 0) + armorDelta;
+      }
+    });
   }
 }

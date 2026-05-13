@@ -222,6 +222,7 @@ export class EnemyAI {
         const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, BASE_TILE.y + Math.floor(Math.random() * 5) - 2));
         const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
         this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
+          if (!unit.isAlive()) return;
           if (path && path.length > 0) unit.setPath(path);
         });
       },
@@ -578,6 +579,7 @@ export class EnemyAI {
     const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
     const tgt = APPROACH_POINTS[this.waveCount % APPROACH_POINTS.length];
     this.pathfinder.findPath(fromX, fromY, tgt.x, tgt.y, (path) => {
+      if (!unit.isAlive()) return;
       if (path && path.length > 0) unit.setPath(path);
     });
     // Alert the player
@@ -612,6 +614,7 @@ export class EnemyAI {
         const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 3) - 1));
         const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
         this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
+          if (!unit.isAlive()) return;
           if (path && path.length > 0) unit.setPath(path);
         });
       }
@@ -632,6 +635,7 @@ export class EnemyAI {
         const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, flankTY + Math.floor(Math.random() * 3) - 1));
         const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
         this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
+          if (!unit.isAlive()) return;
           if (path && path.length > 0) unit.setPath(path);
         });
       }
@@ -655,6 +659,7 @@ export class EnemyAI {
       const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 3) - 1));
       const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
       this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
+        if (!unit.isAlive()) return;
         if (path && path.length > 0) unit.setPath(path);
       });
     }
@@ -683,6 +688,7 @@ export class EnemyAI {
       const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, targetTileY + Math.floor(i / 2)));
       const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
       this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
+        if (!unit.isAlive()) return;
         if (path && path.length > 0) unit.setPath(path);
       });
     }
@@ -712,6 +718,7 @@ export class EnemyAI {
       .forEach(u => {
         const { tileX, tileY } = u.getCurrentTile();
         this.pathfinder.findPath(tileX, tileY, retreatTileX, retreatTileY, (path) => {
+          if (!u.isAlive()) return;
           if (path && path.length > 0) u.setPath(path);
         });
       });
@@ -733,6 +740,7 @@ export class EnemyAI {
       const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 3) - 1));
       const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
       this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
+        if (!unit.isAlive()) return;
         if (path && path.length > 0) unit.setPath(path);
       });
     }
@@ -788,6 +796,7 @@ export class EnemyAI {
       const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 4) - 2));
       const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
       this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
+        if (!unit.isAlive()) return;
         if (path && path.length > 0) unit.setPath(path);
       });
     }
@@ -799,6 +808,7 @@ export class EnemyAI {
         const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, vector.x + Math.floor(Math.random() * 4) - 2));
         const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 4) - 2));
         this.pathfinder.findPath(tileX, tileY, tx, ty, (path) => {
+          if (!u.isAlive()) return;
           if (path && path.length > 0) u.setPath(path);
         });
       });
@@ -845,6 +855,7 @@ export class EnemyAI {
         const tx = Math.max(1, Math.min(MAP_WIDTH_TILES - 1, vector.x + Math.floor(Math.random() * 5) - 2));
         const ty = Math.max(1, Math.min(MAP_HEIGHT_TILES - 1, vector.y + Math.floor(Math.random() * 5) - 2));
         this.pathfinder.findPath(tileX, tileY, tx, ty, (path) => {
+          if (!u.isAlive()) return;
           if (path && path.length > 0) u.setPath(path);
         });
       });
