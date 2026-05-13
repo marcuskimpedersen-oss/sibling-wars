@@ -1911,7 +1911,7 @@ export class GameScene extends Phaser.Scene {
         if (unitMoves) {
           unitMoves.forEach(({ id, tx: destX, ty: destY }) => {
             const unit = this.unitManager.getUnitById(id);
-            if (!unit || !unit.isAlive()) return;
+            if (!unit || !unit.isAlive() || unit.faction === 'player') return;
             const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
             this.pathfinder.findPath(fromX, fromY, destX, destY, (path) => {
               if (!unit.isAlive()) return;
@@ -1921,7 +1921,7 @@ export class GameScene extends Phaser.Scene {
         } else if (unitIds) {
           unitIds.forEach(id => {
             const unit = this.unitManager.getUnitById(id);
-            if (!unit || !unit.isAlive()) return;
+            if (!unit || !unit.isAlive() || unit.faction === 'player') return;
             const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
             this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
               if (!unit.isAlive()) return;
@@ -1935,7 +1935,7 @@ export class GameScene extends Phaser.Scene {
         const unitIds = cmd.unitIds as string[];
         unitIds?.forEach(id => {
           const unit = this.unitManager.getUnitById(id);
-          if (unit?.isAlive()) unit.stopMoving();
+          if (unit?.isAlive() && unit.faction !== 'player') unit.stopMoving();
         });
         break;
       }
@@ -1946,7 +1946,7 @@ export class GameScene extends Phaser.Scene {
         const ty = cmd.ty as number;
         attackerIds?.forEach(id => {
           const unit = this.unitManager.getUnitById(id);
-          if (!unit || !unit.isAlive()) return;
+          if (!unit || !unit.isAlive() || unit.faction === 'player') return;
           const { tileX: fromX, tileY: fromY } = unit.getCurrentTile();
           this.pathfinder.findPath(fromX, fromY, tx, ty, (path) => {
             if (!unit.isAlive()) return;

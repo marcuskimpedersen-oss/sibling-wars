@@ -105,6 +105,9 @@ export class Building {
     if (def.id === 'mine') {
       (this as { garrisonMax: number }).garrisonMax = 10;
     }
+    if (def.id === 'juice_collector') {
+      (this as { garrisonMax: number }).garrisonMax = 3;
+    }
 
     // Built-in armor (e.g. Bulwark wall segments)
     if (def.baseArmor) {
@@ -279,17 +282,17 @@ export class Building {
       }
     }
 
-    // Auto-collection for Mine / Juice Collector
-    if (this.linkedNode && this.linkedResources && !this.linkedNode.isDepleted() && this.def.resourceType && !this.isDisabled()) {
+    // Worker-driven collection for Mine / Juice Collector.
+    // No workers = no income. Each garrisoned worker contributes one unit of
+    // MINE_COLLECTION_AMOUNT (gold) or JUICE_COLLECTION_AMOUNT (juice) per cycle.
+    if (this.linkedNode && this.linkedResources && !this.linkedNode.isDepleted() && this.def.resourceType && !this.isDisabled() && this.garrisonCount > 0) {
       const intervalMs = this.def.resourceType === 'gold' ? MINE_COLLECTION_MS : JUICE_COLLECTION_MS;
-      const amount     = this.def.resourceType === 'gold' ? MINE_COLLECTION_AMOUNT : JUICE_COLLECTION_AMOUNT;
-      // Each garrisoned worker adds +30% speed
-      const garrisonMult = 1 + this.garrisonCount * 0.3;
-      const effectiveInterval = intervalMs / garrisonMult;
+      const amountPerWorker = this.def.resourceType === 'gold' ? MINE_COLLECTION_AMOUNT : JUICE_COLLECTION_AMOUNT;
       this.collectionTimer += delta;
-      if (this.collectionTimer >= effectiveInterval) {
+      if (this.collectionTimer >= intervalMs) {
         this.collectionTimer = 0;
-        const taken = this.linkedNode.harvest(amount);
+        const totalAmount = amountPerWorker * this.garrisonCount;
+        const taken = this.linkedNode.harvest(totalAmount);
         if (this.def.resourceType === 'gold') this.linkedResources.addGold(taken);
         else                                   this.linkedResources.addJuice(taken);
         const { x, y } = this.getWorldCenter();
