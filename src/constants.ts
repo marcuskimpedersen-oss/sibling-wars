@@ -50,9 +50,9 @@ export const JUICE_POSITIONS: Array<{ x: number; y: number; amount: number }> = 
 
 // Resource collection
 export const MINE_COLLECTION_MS = 8000;
-export const MINE_COLLECTION_AMOUNT = 5;
+export const MINE_COLLECTION_AMOUNT = 10;
 export const JUICE_COLLECTION_MS = 10000;
-export const JUICE_COLLECTION_AMOUNT = 3;
+export const JUICE_COLLECTION_AMOUNT = 6;
 export const RESOURCE_SNAP_RADIUS_TILES = 3;
 export const EDGE_SCROLL_MARGIN = 20;
 

@@ -36,7 +36,7 @@ export class WorkerUnit extends Unit {
     tileY: number,
     id: string
   ) {
-    super(scene, tileX, tileY, id, 'worker', 'player', WORKER_COMBAT_STATS);
+    super(scene, tileX, tileY, id, 'unit_worker', 'player', WORKER_COMBAT_STATS);
     this.speed = WORKER_SPEED;
   }
 

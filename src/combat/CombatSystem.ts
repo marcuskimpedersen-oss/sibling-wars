@@ -1,9 +1,82 @@
 import Phaser from 'phaser';
 import { Unit } from '@/units/Unit';
 import { Building } from '@/buildings/Building';
-import { Projectile } from './Projectile';
+import { Projectile, ProjectileConfig } from './Projectile';
 
 const BUILDING_SEEK_RANGE_PX = 600; // how far a unit scans for enemy buildings when idle
+
+// Units that use instant melee hit effects instead of traveling projectiles
+const MELEE_UNIT_TYPES = new Set(['crusader', 'ironclad', 'iron_warden']);
+
+function getProjectileConfig(attacker: Unit): ProjectileConfig {
+  switch (attacker.unitTypeId) {
+    // ── Architects ───────────────────────────────────────────────────────────
+    case 'rifleman':        return { style: 'bullet', colour: 0x88ffff, speed: 520 };
+    case 'arc_trooper':     return { style: 'bolt',   colour: 0x00eeff, speed: 410 };
+    case 'arbiter':         return { style: 'orb',    colour: 0x4499ff, speed: 310 };
+    case 'prime_construct': return { style: 'orb',    colour: 0x00ccff, speed: 310 };
+    // ── Covenant ─────────────────────────────────────────────────────────────
+    case 'devotee':         return { style: 'orb',    colour: 0xffee66, speed: 285 };
+    case 'high_inquisitor': return { style: 'orb',    colour: 0xffd700, speed: 285 };
+    // ── Bulwark ──────────────────────────────────────────────────────────────
+    case 'demolisher':      return { style: 'shell',  colour: 0xff8833, speed: 220 };
+    case 'siege_crawler':   return { style: 'shell',  colour: 0xff6622, speed: 185 };
+    // ── Unseen ───────────────────────────────────────────────────────────────
+    case 'phantom':         return { style: 'needle', colour: 0xcc44ff, speed: 560 };
+    case 'shadow_reaper':   return { style: 'needle', colour: 0xaa22dd, speed: 460 };
+    case 'void_walker':     return { style: 'orb',    colour: 0xcc44ff, speed: 310 };
+    case 'void_reaver':     return { style: 'bolt',   colour: 0xcc44ff, speed: 360 };
+    default:
+      return attacker.faction === 'player'
+        ? { style: 'bolt', colour: 0x88ccff, speed: 380 }
+        : { style: 'bolt', colour: 0xff6644, speed: 380 };
+  }
+}
+
+function spawnMeleeEffect(scene: Phaser.Scene, attacker: Unit, target: Unit): void {
+  const { x: ax, y: ay } = attacker.getPosition();
+  const { x: tx, y: ty } = target.getPosition();
+  const angle = Math.atan2(ty - ay, tx - ax);
+  const typeId = attacker.unitTypeId;
+
+  if (typeId === 'crusader') {
+    // Golden holy slash — fan of lines from impact direction
+    const colour = 0xffdd55;
+    const g = scene.add.graphics().setDepth(26);
+    g.lineStyle(2.5, colour, 0.95);
+    for (let i = -2; i <= 2; i++) {
+      const a = angle + i * 0.22;
+      g.lineBetween(tx - Math.cos(a) * 6, ty - Math.sin(a) * 6, tx + Math.cos(a) * 17, ty + Math.sin(a) * 17);
+    }
+    scene.tweens.add({ targets: g, alpha: 0, duration: 200, onComplete: () => g.destroy() });
+    const flash = scene.add.circle(tx, ty, 9, colour, 0.7).setDepth(25);
+    scene.tweens.add({ targets: flash, scaleX: 2.2, scaleY: 2.2, alpha: 0, duration: 180, ease: 'Power2', onComplete: () => flash.destroy() });
+
+  } else if (typeId === 'ironclad') {
+    // Shockwave pulse ring
+    const colour = 0xffffff;
+    const ring = scene.add.arc(tx, ty, 8, 0, 360, false, colour, 0).setDepth(25).setStrokeStyle(2.5, colour, 0.9);
+    scene.tweens.add({ targets: ring, scaleX: 3, scaleY: 3, alpha: 0, duration: 220, ease: 'Power2', onComplete: () => ring.destroy() });
+    const flash = scene.add.circle(tx, ty, 7, colour, 0.7).setDepth(26);
+    scene.tweens.add({ targets: flash, scaleX: 2, scaleY: 2, alpha: 0, duration: 150, ease: 'Power2', onComplete: () => flash.destroy() });
+
+  } else if (typeId === 'iron_warden') {
+    // Heavy hero slam — two staggered rings + debris
+    const colour = 0xdd9944;
+    const ring1 = scene.add.arc(tx, ty, 10, 0, 360, false, colour, 0).setDepth(25).setStrokeStyle(3, colour, 0.9);
+    scene.tweens.add({ targets: ring1, scaleX: 3, scaleY: 3, alpha: 0, duration: 240, ease: 'Power2', onComplete: () => ring1.destroy() });
+    const ring2 = scene.add.arc(tx, ty, 10, 0, 360, false, colour, 0).setDepth(24).setStrokeStyle(1.5, colour, 0.55);
+    scene.tweens.add({ targets: ring2, scaleX: 4.5, scaleY: 4.5, alpha: 0, delay: 70, duration: 380, ease: 'Power2', onComplete: () => ring2.destroy() });
+    const flash = scene.add.circle(tx, ty, 10, colour, 0.75).setDepth(26);
+    scene.tweens.add({ targets: flash, scaleX: 2.2, scaleY: 2.2, alpha: 0, duration: 180, ease: 'Power2', onComplete: () => flash.destroy() });
+    // 4 debris chunks
+    for (let i = 0; i < 4; i++) {
+      const a  = angle + (i / 4) * Math.PI * 2;
+      const dot = scene.add.circle(tx, ty, 2.5, colour, 0.9).setDepth(25);
+      scene.tweens.add({ targets: dot, x: tx + Math.cos(a) * (12 + Math.random() * 8), y: ty + Math.sin(a) * (12 + Math.random() * 8), alpha: 0, scale: 0.2, duration: 260 + Math.random() * 120, ease: 'Power2', onComplete: () => dot.destroy() });
+    }
+  }
+}
 
 export class CombatSystem {
   private scene: Phaser.Scene;
@@ -11,16 +84,19 @@ export class CombatSystem {
 
   constructor(scene: Phaser.Scene) {
     this.scene = scene;
-    // Spawn a visual projectile on each attack event
+
     scene.events.on('unit:attacked', (attacker: Unit, target: Unit) => {
-      const col = attacker.unitTypeId === 'void_reaver' ? 0xcc44ff
-                : attacker.faction === 'player' ? 0x88ccff : 0xff6644;
-      this.projectiles.push(new Projectile(
-        scene,
-        attacker.getPosition().x, attacker.getPosition().y,
-        target.getPosition().x, target.getPosition().y,
-        col
-      ));
+      // Colossus has its own beam visual — skip standard projectile
+      if (attacker.unitTypeId === 'colossus') return;
+
+      if (MELEE_UNIT_TYPES.has(attacker.unitTypeId)) {
+        spawnMeleeEffect(scene, attacker, target);
+      } else {
+        const config = getProjectileConfig(attacker);
+        const ap = attacker.getPosition();
+        const tp = target.getPosition();
+        this.projectiles.push(new Projectile(scene, ap.x, ap.y, tp.x, tp.y, config));
+      }
     });
   }
 
@@ -53,9 +129,10 @@ export class CombatSystem {
         }
       }
 
-      // Hold stance: never auto-acquire new targets if already stationary.
-      // (They will only react to enemies entering their attack range — which is
-      //  exactly what findNearestEnemyUnit does by using attackRangePx as the cap.)
+      // Units with an active player-issued move order keep moving — don't interrupt them.
+      // They will auto-engage once they arrive (moveDest cleared) or if explicitly
+      // attack-moved. This prevents "losing control" when passing near enemies.
+      if (unit.moveDest !== null) continue;
 
       // Find nearest enemy unit in range
       const target = this.findNearestEnemyUnit(unit, living);
@@ -64,22 +141,21 @@ export class CombatSystem {
         continue;
       }
 
-      // No unit target — check nearby enemy buildings
-      const bTarget = this.findNearestEnemyBuilding(unit, buildings);
-      if (bTarget) {
-        const { x: bx, y: by } = bTarget.getWorldCenter();
-        const distToBuilding = unit.distanceToPoint(bx, by);
-        const inRange = distToBuilding <= unit.attackRangePx;
-
-        if (inRange) {
-          unit.stopMoving();
-          const dmg = unit.attackDamage * (delta / unit.attackCooldownMs);
-          if (bTarget.takeDamage(dmg)) {
-            destroyedBuildings.push(bTarget);
+      // No unit target — check nearby enemy buildings (aggressive stance only, idle only)
+      if (unit.stance === 'aggressive' && !unit.isMoving()) {
+        const bTarget = this.findNearestEnemyBuilding(unit, buildings);
+        if (bTarget) {
+          const { x: bx, y: by } = bTarget.getWorldCenter();
+          const distToBuilding = unit.distanceToPoint(bx, by);
+          if (distToBuilding <= unit.attackRangePx) {
+            unit.stopMoving();
+            const dmg = unit.attackDamage * (delta / unit.attackCooldownMs);
+            if (bTarget.takeDamage(dmg)) {
+              destroyedBuildings.push(bTarget);
+            }
+          } else {
+            this.scene.events.emit('unit:pathToBuilding', unit, bx, by);
           }
-        } else if (unit.stance === 'aggressive' && !unit.isMoving()) {
-          // Path toward the building so it can get in range
-          this.scene.events.emit('unit:pathToBuilding', unit, bx, by);
         }
       }
     }

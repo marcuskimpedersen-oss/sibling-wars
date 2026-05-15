@@ -60,7 +60,7 @@ export class Unit {
   private waypointGfx: Phaser.GameObjects.Graphics;
 
   // ── Stance ───────────────────────────────────────────────────────────────────
-  stance: UnitStance = 'aggressive';
+  stance: UnitStance = 'defensive';
   /** World-space anchor used by the defensive stance to leash and return. */
   defensiveAnchor: { x: number; y: number } | null = null;
 
@@ -245,6 +245,8 @@ export class Unit {
   isRetreating: boolean = false;
   private retreatHQX: number = 0;
   private retreatHQY: number = 0;
+  private retreatPath: PathStep[] = [];
+  private retreatStep: number = 0;
   private _retreatLabel: Phaser.GameObjects.Text | null = null;
   private readonly RETREAT_SPEED_MULT = 1.5;
   private readonly RETREAT_STOP_DIST_SQ = 150 * 150;
@@ -395,10 +397,12 @@ export class Unit {
 
   // ── Retreat ───────────────────────────────────────────────────────────────────
 
-  beginRetreat(hqWorldX: number, hqWorldY: number): void {
+  beginRetreat(hqWorldX: number, hqWorldY: number, path?: PathStep[]): void {
     this.isRetreating = true;
     this.retreatHQX = hqWorldX;
     this.retreatHQY = hqWorldY;
+    this.retreatPath = path && path.length > 0 ? path : [];
+    this.retreatStep = 0;
     this.attackTarget = null;
     // Show floating RETREAT label
     if (this._retreatLabel) { this._retreatLabel.destroy(); this._retreatLabel = null; }
@@ -1160,6 +1164,25 @@ export class Unit {
     if (this.state === 'moving') this.state = 'idle';
   }
 
+  // ── Garrison helpers ─────────────────────────────────────────────────────────
+
+  /** Hide all visuals immediately when this unit enters a building. */
+  hideForGarrison(): void {
+    this.scene.tweens.killTweensOf(this.sprite);
+    this.sprite.setVisible(false).setAlpha(1).setScale(1);
+    this.shadow.setVisible(false);
+    this.selectionCircle.setVisible(false);
+    this.healthBarBg.setVisible(false);
+    this.healthBar.setVisible(false);
+  }
+
+  /** Restore visuals when this unit exits a building. */
+  showAfterGarrison(): void {
+    this.scene.tweens.killTweensOf(this.sprite);
+    this.sprite.setAlpha(1).setScale(1).setVisible(true);
+    this.shadow.setVisible(true);
+  }
+
   // ── Combat ───────────────────────────────────────────────────────────────────
 
   beginAttack(target: Unit): void {
@@ -1217,13 +1240,27 @@ export class Unit {
     // Minimap combat flash
     this.scene.events.emit('unit:damaged', this);
 
-    // Hit flash — brief white burst at unit position
-    const flash = this.scene.add.ellipse(this.sprite.x, this.sprite.y, 30, 30, 0xffffff, 0.55).setDepth(25);
+    // Hit effect — expanding ring + spark streaks
+    const ring = this.scene.add.arc(this.sprite.x, this.sprite.y, 10, 0, 360, false, 0xffffff, 0)
+      .setDepth(25).setStrokeStyle(2, 0xffffff, 0.85);
     this.scene.tweens.add({
-      targets: flash, alpha: 0, scaleX: 1.6, scaleY: 1.6,
-      duration: 160, ease: 'Power2',
-      onComplete: () => flash.destroy(),
+      targets: ring, scaleX: 3.2, scaleY: 3.2, alpha: 0,
+      duration: 180, ease: 'Power2', onComplete: () => ring.destroy(),
     });
+    for (let i = 0; i < 3; i++) {
+      const angle = (i / 3) * Math.PI * 2 + Math.random() * 1.2;
+      const dist  = 12 + Math.random() * 12;
+      const spark = this.scene.add.rectangle(this.sprite.x, this.sprite.y, 5, 2, 0xffffff, 0.9)
+        .setDepth(25).setRotation(angle);
+      this.scene.tweens.add({
+        targets: spark,
+        x: this.sprite.x + Math.cos(angle) * dist,
+        y: this.sprite.y + Math.sin(angle) * dist,
+        alpha: 0, scaleX: 0.2,
+        duration: 140 + Math.random() * 80, ease: 'Power2',
+        onComplete: () => spark.destroy(),
+      });
+    }
 
     if (this.health === 0) {
       this.alive = false;
@@ -1274,74 +1311,144 @@ export class Unit {
     if (this._lastStandAura) { this.scene.tweens.killTweensOf(this._lastStandAura); this._lastStandAura.destroy(); this._lastStandAura = null; }
     this.lastStandActive = false;
 
-    // ── Death animation variant (random) ─────────────────────────────────────
-    const variant = Math.floor(Math.random() * 3);
+    // ── Death animation ───────────────────────────────────────────────────────
     const sx = this.sprite.x;
     const sy = this.sprite.y;
 
+    // Hero death: dramatic concentric shockwave rings + event for camera shake
+    if (this.isHero) {
+      this.scene.events.emit('unit:heroDied', this);
+      for (let r = 0; r < 3; r++) {
+        const delay = r * 90;
+        const heroRing = this.scene.add.arc(sx, sy, 14, 0, 360, false, 0xffffff, 0)
+          .setDepth(26).setStrokeStyle(3 - r, 0xffffff, 0.9);
+        this.scene.time.delayedCall(delay, () => {
+          this.scene.tweens.add({
+            targets: heroRing, scaleX: 5 + r, scaleY: 5 + r, alpha: 0,
+            duration: 500, ease: 'Power2', onComplete: () => heroRing.destroy(),
+          });
+        });
+      }
+    }
+
+    const variant = this.isHero ? 0 : Math.floor(Math.random() * 3);
+
     if (variant === 0) {
-      // Explosion: orange/red particle burst
-      const count = 10 + Math.floor(Math.random() * 6);
+      // Explosion: particle burst + shockwave ring + rising smoke
+
+      // Shockwave ring
+      const shockwave = this.scene.add.arc(sx, sy, 10, 0, 360, false, 0xffffff, 0)
+        .setDepth(24).setStrokeStyle(2, 0xffcc44, 0.75);
+      this.scene.tweens.add({
+        targets: shockwave, scaleX: 4.5, scaleY: 4.5, alpha: 0,
+        duration: 300, ease: 'Power2', onComplete: () => shockwave.destroy(),
+      });
+
+      // Particles
+      const count = this.isHero ? 22 : 14 + Math.floor(Math.random() * 6);
       for (let i = 0; i < count; i++) {
-        const angle = (i / count) * Math.PI * 2 + Math.random() * 0.5;
-        const radius = 20 + Math.random() * 22;
-        const px = sx + Math.cos(angle) * radius;
-        const py = sy + Math.sin(angle) * radius;
-        const col = Math.random() < 0.6 ? 0xff6600 : 0xff2200;
-        const dot = this.scene.add.circle(sx, sy, 2 + Math.random() * 3, col, 0.95).setDepth(25);
+        const angle  = (i / count) * Math.PI * 2 + Math.random() * 0.4;
+        const radius = (this.isHero ? 30 : 20) + Math.random() * 25;
+        const col    = Math.random() < 0.55 ? 0xff6600 : Math.random() < 0.5 ? 0xff2200 : 0xffcc44;
+        const dot    = this.scene.add.circle(sx, sy, 2 + Math.random() * 3, col, 0.95).setDepth(25);
         this.scene.tweens.add({
-          targets: dot, x: px, y: py, alpha: 0, scale: 0.1,
-          duration: 350 + Math.random() * 250, ease: 'Power2',
+          targets: dot,
+          x: sx + Math.cos(angle) * radius,
+          y: sy + Math.sin(angle) * radius,
+          alpha: 0, scale: 0.1,
+          duration: 380 + Math.random() * 280, ease: 'Power2',
           onComplete: () => dot.destroy(),
         });
       }
+
       // Central flash
-      const flash = this.scene.add.circle(sx, sy, 12, 0xffcc44, 0.8).setDepth(26);
+      const flash = this.scene.add.circle(sx, sy, this.isHero ? 18 : 12, 0xffcc44, 0.9).setDepth(26);
       this.scene.tweens.add({
-        targets: flash, scaleX: 2.5, scaleY: 2.5, alpha: 0,
-        duration: 280, ease: 'Power2', onComplete: () => flash.destroy(),
+        targets: flash, scaleX: this.isHero ? 3.5 : 2.5, scaleY: this.isHero ? 3.5 : 2.5, alpha: 0,
+        duration: 300, ease: 'Power2', onComplete: () => flash.destroy(),
       });
-      this.scene.tweens.add({ targets: this.sprite, alpha: 0, duration: 200, onComplete: () => this.sprite.setVisible(false) });
+
+      // Rising smoke puffs
+      for (let i = 0; i < 4; i++) {
+        const ox = (Math.random() - 0.5) * 18;
+        const smoke = this.scene.add.circle(sx + ox, sy, 4 + Math.random() * 3, 0x666666, 0.5).setDepth(23);
+        this.scene.tweens.add({
+          targets: smoke, y: sy - 22 - Math.random() * 16, alpha: 0, scaleX: 2.8, scaleY: 2.8,
+          delay: 80 + i * 60,
+          duration: 500 + Math.random() * 200, ease: 'Power1', onComplete: () => smoke.destroy(),
+        });
+      }
+
+      this.scene.tweens.add({ targets: this.sprite, alpha: 0, duration: 180, onComplete: () => this.sprite.setVisible(false) });
 
     } else if (variant === 1) {
-      // Collapse: shrink to 0 scale while fading
+      // Collapse: shrink + coloured sparks + dust
+
       this.scene.tweens.add({
         targets: this.sprite, scaleX: 0, scaleY: 0, alpha: 0,
-        duration: 500, ease: 'Back.easeIn',
+        duration: 480, ease: 'Back.easeIn',
         onComplete: () => this.sprite.setVisible(false),
       });
-      // Dust puff
-      for (let i = 0; i < 5; i++) {
-        const ox = (Math.random() - 0.5) * 20;
-        const oy = (Math.random() - 0.5) * 20;
-        const dust = this.scene.add.circle(sx + ox, sy + oy, 3 + Math.random() * 3, 0x888888, 0.6).setDepth(25);
+
+      // Dust puffs
+      for (let i = 0; i < 6; i++) {
+        const ox = (Math.random() - 0.5) * 22;
+        const oy = (Math.random() - 0.5) * 22;
+        const dust = this.scene.add.circle(sx + ox, sy + oy, 3 + Math.random() * 3, 0x888888, 0.55).setDepth(25);
         this.scene.tweens.add({
-          targets: dust, y: sy + oy - 20, alpha: 0, scaleX: 2, scaleY: 2,
-          duration: 450 + Math.random() * 200, ease: 'Power1', onComplete: () => dust.destroy(),
+          targets: dust, y: sy + oy - 24, alpha: 0, scaleX: 2.2, scaleY: 2.2,
+          duration: 460 + Math.random() * 220, ease: 'Power1', onComplete: () => dust.destroy(),
+        });
+      }
+
+      // Outward sparks
+      for (let i = 0; i < 5; i++) {
+        const angle  = (i / 5) * Math.PI * 2 + Math.random() * 0.8;
+        const spark  = this.scene.add.rectangle(sx, sy, 5, 2, 0xffffff, 0.85).setDepth(25).setRotation(angle);
+        this.scene.tweens.add({
+          targets: spark,
+          x: sx + Math.cos(angle) * (14 + Math.random() * 10),
+          y: sy + Math.sin(angle) * (14 + Math.random() * 10),
+          alpha: 0, scaleX: 0.2,
+          duration: 200 + Math.random() * 120, ease: 'Power2',
+          onComplete: () => spark.destroy(),
         });
       }
 
     } else {
-      // Shatter: 4 pieces fly apart
-      const w = this.sprite.displayWidth / 2;
-      const h = this.sprite.displayHeight / 2;
-      const quadrants = [
-        { ox: -w * 0.35, oy: -h * 0.35, tx: -30 - Math.random() * 20, ty: -25 - Math.random() * 15 },
-        { ox:  w * 0.35, oy: -h * 0.35, tx:  30 + Math.random() * 20, ty: -25 - Math.random() * 15 },
-        { ox: -w * 0.35, oy:  h * 0.35, tx: -25 - Math.random() * 15, ty:  30 + Math.random() * 20 },
-        { ox:  w * 0.35, oy:  h * 0.35, tx:  25 + Math.random() * 15, ty:  30 + Math.random() * 20 },
-      ];
+      // Shatter: 6 pieces fly apart + impact ring
+
+      // Impact ring
+      const impRing = this.scene.add.arc(sx, sy, 8, 0, 360, false, 0xffffff, 0)
+        .setDepth(24).setStrokeStyle(2, 0xffffff, 0.8);
+      this.scene.tweens.add({
+        targets: impRing, scaleX: 4, scaleY: 4, alpha: 0,
+        duration: 250, ease: 'Power2', onComplete: () => impRing.destroy(),
+      });
+
+      // 6 debris pieces
+      const w   = this.sprite.displayWidth  / 2;
+      const h   = this.sprite.displayHeight / 2;
       const tint = this.faction === 'player' ? 0x55aaff : 0xff5533;
-      quadrants.forEach(({ ox, oy, tx, ty }) => {
-        const piece = this.scene.add.rectangle(sx + ox, sy + oy, w * 0.9, h * 0.9, tint, 0.85).setDepth(25);
+      for (let i = 0; i < 6; i++) {
+        const angle  = (i / 6) * Math.PI * 2;
+        const spread = 28 + Math.random() * 18;
+        const piece  = this.scene.add.rectangle(
+          sx + Math.cos(angle) * w * 0.3,
+          sy + Math.sin(angle) * h * 0.3,
+          w * 0.85, h * 0.85, tint, 0.85
+        ).setDepth(25);
         this.scene.tweens.add({
-          targets: piece, x: sx + ox + tx, y: sy + oy + ty,
-          alpha: 0, angle: (Math.random() - 0.5) * 180,
-          duration: 480 + Math.random() * 200, ease: 'Power2',
+          targets: piece,
+          x: sx + Math.cos(angle) * spread,
+          y: sy + Math.sin(angle) * spread,
+          alpha: 0, angle: (Math.random() - 0.5) * 200,
+          duration: 460 + Math.random() * 220, ease: 'Power2',
           onComplete: () => piece.destroy(),
         });
-      });
-      this.scene.tweens.add({ targets: this.sprite, alpha: 0, duration: 120, onComplete: () => this.sprite.setVisible(false) });
+      }
+
+      this.scene.tweens.add({ targets: this.sprite, alpha: 0, duration: 100, onComplete: () => this.sprite.setVisible(false) });
     }
   }
 
@@ -1795,6 +1902,9 @@ export class Unit {
       this._hadWaypoints = false;
     }
 
+    // Garrisoned units are hidden inside a building — skip all visibility logic
+    if (this.isGarrisoned) return;
+
     // Fog-of-war: hide all visuals when not in vision range
     if (!this.fogVisible) {
       this.sprite.setVisible(false);
@@ -1980,21 +2090,46 @@ export class Unit {
 
     // ── Retreat movement ────────────────────────────────────────────────────────
     if (this.isRetreating) {
-      const dx = this.retreatHQX - this.sprite.x;
-      const dy = this.retreatHQY - this.sprite.y;
-      const distSq = dx * dx + dy * dy;
-      if (distSq <= this.RETREAT_STOP_DIST_SQ) {
-        // Arrived near HQ
-        this.isRetreating = false;
-        this.state = 'idle';
-        return;
-      }
-      const dist = Math.sqrt(distSq);
       const step = this.speed * this.RETREAT_SPEED_MULT * this.moveSpeedMultiplier * (delta / 1000);
-      this.sprite.x += (dx / dist) * step;
-      this.sprite.y += (dy / dist) * step;
-      this.sprite.setFlipX(dx < 0);
-      this.state = 'moving';
+      if (this.retreatPath.length > 0 && this.retreatStep < this.retreatPath.length) {
+        // Follow pathfinder-guided route so units don't clip through buildings
+        const waypoint = this.retreatPath[this.retreatStep];
+        const targetX = waypoint.x * TILE_SIZE + TILE_SIZE / 2;
+        const targetY = waypoint.y * TILE_SIZE + TILE_SIZE / 2;
+        const dx = targetX - this.sprite.x;
+        const dy = targetY - this.sprite.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist <= step) {
+          this.sprite.setPosition(targetX, targetY);
+          this.retreatStep++;
+          if (this.retreatStep >= this.retreatPath.length) {
+            this.isRetreating = false;
+            this.retreatPath = [];
+            this.state = 'idle';
+            return;
+          }
+        } else {
+          this.sprite.x += (dx / dist) * step;
+          this.sprite.y += (dy / dist) * step;
+          this.sprite.setFlipX(dx < 0);
+        }
+        this.state = 'moving';
+      } else {
+        // Fallback: straight-line when no path is available
+        const dx = this.retreatHQX - this.sprite.x;
+        const dy = this.retreatHQY - this.sprite.y;
+        const distSq = dx * dx + dy * dy;
+        if (distSq <= this.RETREAT_STOP_DIST_SQ) {
+          this.isRetreating = false;
+          this.state = 'idle';
+          return;
+        }
+        const dist = Math.sqrt(distSq);
+        this.sprite.x += (dx / dist) * step;
+        this.sprite.y += (dy / dist) * step;
+        this.sprite.setFlipX(dx < 0);
+        this.state = 'moving';
+      }
       return;
     }
 

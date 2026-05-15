@@ -5,6 +5,7 @@ export class PathfinderService {
   private easystar: EasyStar.js;
   private gridCols: number;
   private gridRows: number;
+  private terrainGrid: number[][];
 
   constructor(grid: number[][]) {
     this.easystar = new EasyStar.js();
@@ -15,6 +16,15 @@ export class PathfinderService {
     (this.easystar as any).setIterationsPerCalculation(500);
     this.gridRows = grid.length;
     this.gridCols = grid[0]?.length ?? 0;
+    this.terrainGrid = grid;
+  }
+
+  /** Returns true if the tile is passable terrain (not rock/wall). */
+  isTileWalkable(x: number, y: number): boolean {
+    const xi = Math.floor(x);
+    const yi = Math.floor(y);
+    if (xi < 0 || yi < 0 || xi >= this.gridCols || yi >= this.gridRows) return false;
+    return this.terrainGrid[yi][xi] === 0;
   }
 
   private clamp(x: number, y: number): { x: number; y: number } {

@@ -15,6 +15,8 @@ export class BuildingManager {
 
   onUnitProduced: ((unitDef: ProducedUnitDef, tileX: number, tileY: number, faction: Faction, building: Building) => void) | null = null;
   onBuildingDestroyed: ((building: Building) => void) | null = null;
+  /** Injected by GameScene — passed to each new player building to pause production at pop cap. */
+  isSupplyCapped: (() => boolean) | null = null;
 
   constructor(scene: Phaser.Scene, pathfinder: PathfinderService, resources: ResourceManager) {
     this.scene = scene;
@@ -31,6 +33,9 @@ export class BuildingManager {
     building.onUnitProduced = (unitDef, spawnX, spawnY) => {
       this.onUnitProduced?.(unitDef, spawnX, spawnY, faction, building);
     };
+    if (faction === 'player' && this.isSupplyCapped) {
+      building.isSupplyCapped = this.isSupplyCapped;
+    }
     building.onDestroyed = () => {
       // Unblock pathfinder tiles and free occupied slots so new buildings can be placed
       for (let dy = 0; dy < def.tileHeight; dy++) {
@@ -61,7 +66,10 @@ export class BuildingManager {
     if (tileY + def.tileHeight > MAP_HEIGHT_TILES - 1) return false;
     for (let dy = 0; dy < def.tileHeight; dy++) {
       for (let dx = 0; dx < def.tileWidth; dx++) {
-        if (this.occupiedTiles.has(`${tileX + dx},${tileY + dy}`)) return false;
+        const tx = tileX + dx;
+        const ty = tileY + dy;
+        if (this.occupiedTiles.has(`${tx},${ty}`)) return false;
+        if (!this.pathfinder.isTileWalkable(tx, ty)) return false;
       }
     }
     return true;
@@ -85,7 +93,7 @@ export class BuildingManager {
 
   getTotalSupply(): number {
     let total = 0;
-    this.buildings.forEach(b => { if (!b.isDestroyed() && b.faction === 'player') total += b.def.supplyProvided; });
+    this.buildings.forEach(b => { if (!b.isDestroyed() && b.faction === 'player' && b.isBuilt) total += b.def.supplyProvided; });
     return total;
   }
 

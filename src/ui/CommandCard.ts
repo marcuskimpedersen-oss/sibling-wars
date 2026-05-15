@@ -4,10 +4,12 @@ import { Race } from '@/constants';
 export interface CommandCardConfig {
   isWorkerOnly: boolean;
   race: Race;
-  abilityInfo:  { type: string; ready: boolean; active: boolean; cooldownSec: number } | null;
-  eAbilityInfo: { type: string; ready: boolean; active: boolean; cooldownSec: number } | null;
-  rAbilityInfo: { type: string; ready: boolean; active: boolean; cooldownSec: number } | null;
+  abilityInfo:  { type: string; ready: boolean; active: boolean; cooldownSec: number; locked?: boolean } | null;
+  eAbilityInfo: { type: string; ready: boolean; active: boolean; cooldownSec: number; locked?: boolean } | null;
+  rAbilityInfo: { type: string; ready: boolean; active: boolean; cooldownSec: number; locked?: boolean } | null;
   hasBAbility:  boolean; // Unseen Phantoms selected
+  /** True when the Stealth ability has not yet been researched. */
+  bAbilityLocked?: boolean;
   /** True when at least one Bulwark Siege Crawler is selected. */
   hasSiegeCrawler?: boolean;
   /** True when the selected Siege Crawler is currently in siege mode. */
@@ -21,6 +23,7 @@ interface CmdBtn {
   color: string;
   enabled: boolean;
   active?: boolean;
+  locked?: boolean;
   cooldownSec?: number;
   event: string;
 }
@@ -94,77 +97,69 @@ export class CommandCard {
   }
 
   private buildButtons(cfg: CommandCardConfig): CmdBtn[] {
-    const { isWorkerOnly, race, abilityInfo, eAbilityInfo, rAbilityInfo, hasBAbility, hasSiegeCrawler, siegeActive } = cfg;
+    const { isWorkerOnly, race, abilityInfo, eAbilityInfo, rAbilityInfo,
+            hasBAbility, bAbilityLocked, hasSiegeCrawler, siegeActive } = cfg;
 
-    // Row 1: movement commands
-    const row1: CmdBtn[] = [
-      {
-        key: 'M', label: 'Move',    color: '#88aacc',
-        enabled: true,
-        event: 'commandcard:move',
-      },
-      {
-        key: 'S', label: 'Stop',    color: '#88aacc',
-        enabled: true,
-        event: 'input:stopUnits',
-      },
-      {
-        key: 'A', label: 'A-Move',  color: '#ff8844',
-        enabled: !isWorkerOnly,
-        event: 'input:startAttackMove',
-      },
-    ];
+    const empty: CmdBtn = { key: '', label: '', color: '#334455', enabled: false, event: '' };
+
+    if (isWorkerOnly) {
+      return [empty, empty, empty, empty, empty, empty, empty, empty, empty];
+    }
+
+    // Row 1: A-Move, Patrol, empty
+    const aMoveBtn: CmdBtn = {
+      key: 'A', label: 'A-Move', color: '#ff8844',
+      enabled: true,
+      event: 'input:startAttackMove',
+    };
+    const patrolBtn: CmdBtn = {
+      key: 'P', label: 'Patrol', color: '#44ffcc',
+      enabled: true,
+      event: 'input:startPatrol',
+    };
 
     // Row 2, slot 0: Holy Nova (R) for Covenant Devotees; Stealth (B) for Unseen Phantoms; else empty
-    const bAbility: CmdBtn = race === 'covenant' && rAbilityInfo
-      ? {
-          key: 'R',
-          label: 'Holy Nova',
-          color: rAbilityInfo.ready ? '#ffffd0' : '#556655',
-          enabled: rAbilityInfo.ready,
-          active: false,
-          cooldownSec: !rAbilityInfo.ready ? rAbilityInfo.cooldownSec : undefined,
-          event: 'input:activateHolyNova',
-        }
-      : {
-          key: 'B',
-          label: race === 'unseen' ? 'Stealth' : '—',
-          color: hasBAbility ? '#bb44ee' : '#334455',
-          enabled: hasBAbility,
-          event: 'input:activateStealth',
-        };
+    let bAbility: CmdBtn;
+    if (race === 'covenant' && rAbilityInfo) {
+      bAbility = {
+        key: 'R',
+        label: 'Holy Nova',
+        color: rAbilityInfo.locked ? '#553322' : (rAbilityInfo.ready ? '#ffffd0' : '#556655'),
+        enabled: !!(rAbilityInfo.ready) && !rAbilityInfo.locked,
+        locked: rAbilityInfo.locked,
+        active: false,
+        cooldownSec: (!rAbilityInfo.ready && !rAbilityInfo.locked) ? rAbilityInfo.cooldownSec : undefined,
+        event: 'input:activateHolyNova',
+      };
+    } else if (race === 'unseen' && hasBAbility) {
+      bAbility = {
+        key: 'B',
+        label: 'Stealth',
+        color: bAbilityLocked ? '#553366' : '#bb44ee',
+        enabled: !bAbilityLocked,
+        locked: bAbilityLocked,
+        event: 'input:activateStealth',
+      };
+    } else {
+      bAbility = empty;
+    }
 
-    let cLabel = '—';
-    if (race === 'architects') cLabel = 'Overcharge';
-    else if (race === 'bulwark') cLabel = 'Shield Wall';
-    const cAbility: CmdBtn = {
+    // C-ability slot
+    const cAbility: CmdBtn = abilityInfo ? {
       key: 'C',
-      label: abilityInfo ? abilityInfo.type : cLabel,
-      color: abilityInfo
-        ? (abilityInfo.active ? '#ffff44' : abilityInfo.ready ? '#44ff88' : '#556677')
-        : '#334455',
-      enabled: !!(abilityInfo?.ready),
-      active: abilityInfo?.active,
-      cooldownSec: !abilityInfo?.ready && abilityInfo ? abilityInfo.cooldownSec : undefined,
+      label: abilityInfo.type,
+      color: abilityInfo.locked ? '#223344'
+           : abilityInfo.active  ? '#ffff44'
+           : abilityInfo.ready   ? '#44ff88'
+           : '#556677',
+      enabled: !!(abilityInfo.ready) && !abilityInfo.locked,
+      active: abilityInfo.active,
+      locked: abilityInfo.locked,
+      cooldownSec: (!abilityInfo.ready && !abilityInfo.locked) ? abilityInfo.cooldownSec : undefined,
       event: 'input:activateAbility',
-    };
+    } : empty;
 
-    let eLabel = '—';
-    if (race === 'covenant') eLabel = 'D. Pulse';
-    else if (race === 'unseen') eLabel = 'Shad. Step';
-    const eAbility: CmdBtn = {
-      key: 'E',
-      label: eAbilityInfo ? eAbilityInfo.type : eLabel,
-      color: eAbilityInfo
-        ? (eAbilityInfo.active ? '#ffff44' : eAbilityInfo.ready ? '#44ffaa' : '#446655')
-        : '#334455',
-      enabled: !!(eAbilityInfo?.ready),
-      active: eAbilityInfo?.active,
-      cooldownSec: !eAbilityInfo?.ready && eAbilityInfo ? eAbilityInfo.cooldownSec : undefined,
-      event: 'input:activateEAbility',
-    };
-
-    // Siege Mode toggle (T) — shown in E-slot for Bulwark when Siege Crawlers selected
+    // E-ability slot (or Siege toggle for Bulwark)
     const siegeBtn: CmdBtn = {
       key: 'T',
       label: siegeActive ? 'Undeploy' : 'Siege',
@@ -174,26 +169,29 @@ export class CommandCard {
       event: 'input:toggleSiegeMode',
     };
 
-    const empty: CmdBtn = { key: '', label: '', color: '#334455', enabled: false, event: '' };
-
-    const patrolBtn: CmdBtn = {
-      key: 'P', label: 'Patrol', color: '#44ffcc',
-      enabled: !isWorkerOnly,
-      event: 'input:startPatrol',
-    };
-
-    if (isWorkerOnly) {
-      // Workers: just M and S; fill rest with empty slots
-      return [
-        row1[0], row1[1], empty,
-        empty, empty, empty,
-        empty, empty, empty,
-      ];
+    let eAbility: CmdBtn;
+    if (race === 'bulwark' && hasSiegeCrawler) {
+      eAbility = siegeBtn;
+    } else if (eAbilityInfo) {
+      eAbility = {
+        key: 'E',
+        label: eAbilityInfo.type,
+        color: eAbilityInfo.locked ? '#223344'
+             : eAbilityInfo.active  ? '#ffff44'
+             : eAbilityInfo.ready   ? '#44ffaa'
+             : '#446655',
+        enabled: !!(eAbilityInfo.ready) && !eAbilityInfo.locked,
+        active: eAbilityInfo.active,
+        locked: eAbilityInfo.locked,
+        cooldownSec: (!eAbilityInfo.ready && !eAbilityInfo.locked) ? eAbilityInfo.cooldownSec : undefined,
+        event: 'input:activateEAbility',
+      };
+    } else {
+      eAbility = empty;
     }
 
-    // Bulwark with Siege Crawler: replace E slot with T (Siege toggle)
-    const thirdAbility = (race === 'bulwark' && hasSiegeCrawler) ? siegeBtn : eAbility;
-    return [...row1, bAbility, cAbility, thirdAbility, patrolBtn, empty, empty];
+    // Grid: row1=[A-Move, Patrol, empty], row2=[B, C, E/Siege], row3=[empty, empty, empty]
+    return [aMoveBtn, patrolBtn, empty, bAbility, cAbility, eAbility, empty, empty, empty];
   }
 
   private drawButton(btn: CmdBtn, bx: number, by: number): void {
@@ -209,15 +207,17 @@ export class CommandCard {
         return;
       }
       const bgColor = btn.active  ? 0x332200
+        : btn.locked  ? 0x1a0e08
         : btn.enabled ? (hover ? 0x1a3450 : 0x0e1e2e)
         : 0x0a0a12;
       gfx.fillStyle(bgColor, 1);
       gfx.fillRoundedRect(bx, by, BTN_W, BTN_H, 5);
 
       const borderColor = btn.active  ? 0xffdd44
+        : btn.locked  ? 0x663322
         : btn.enabled ? (hover ? 0x5599ff : 0x2255aa)
         : 0x1a1a2e;
-      gfx.lineStyle(1.5, borderColor, btn.enabled ? 1 : 0.5);
+      gfx.lineStyle(1.5, borderColor, (btn.enabled || btn.locked) ? 1 : 0.5);
       gfx.strokeRoundedRect(bx, by, BTN_W, BTN_H, 5);
 
       // Cooldown overlay
@@ -251,7 +251,10 @@ export class CommandCard {
     // Status line — bottom (cooldown or state)
     let statusTxt = '';
     let statusCol = '#445566';
-    if (btn.active) {
+    if (btn.locked) {
+      statusTxt = 'Locked';
+      statusCol = '#884422';
+    } else if (btn.active) {
       statusTxt = 'Active';
       statusCol = '#ffdd44';
     } else if (btn.cooldownSec !== undefined && btn.cooldownSec > 0) {

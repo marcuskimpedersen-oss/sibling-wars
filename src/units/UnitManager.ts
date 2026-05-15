@@ -45,6 +45,11 @@ export class UnitManager {
   armorBonus: number = 0;
   /** Cumulative speed bonus from global upgrades (pixels/second added to UNIT_SPEED). */
   speedBonus: number = 0;
+  /** Abilities that have been unlocked via academy research. */
+  unlockedAbilities: Set<string> = new Set();
+
+  unlockAbility(key: string): void { this.unlockedAbilities.add(key); }
+  isAbilityUnlocked(key: string): boolean { return this.unlockedAbilities.has(key); }
   /** Opponent's cumulative attack/armor/speed upgrades — applied to enemy mirror units. */
   enemyAttackBonus: number = 0;
   enemyArmorBonus: number = 0;
@@ -74,7 +79,8 @@ export class UnitManager {
     const id = `${this.unitIdPrefix}unit_${this.nextId++}`;
     const base = stats ?? RACE_COMBAT_STATS[this.playerRace];
     const boosted = { ...base, attackDamage: base.attackDamage + this.attackBonus };
-    const unit = new Unit(this.scene, tileX, tileY, id, 'unit', 'player', boosted);
+    const textureKey = unitTypeId && this.scene.textures.exists(`unit_${unitTypeId}`) ? `unit_${unitTypeId}` : 'unit';
+    const unit = new Unit(this.scene, tileX, tileY, id, textureKey, 'player', boosted);
     unit.armor = this.armorBonus;
     unit.attackUpgrades = Math.min(3, Math.floor(this.attackBonus / 3));
     unit.armorUpgrades  = Math.min(3, Math.floor(this.armorBonus  / 3));
@@ -135,7 +141,8 @@ export class UnitManager {
 
   spawnEnemyUnit(tileX: number, tileY: number, stats?: CombatStats, race?: Race, unitTypeId?: string): Unit {
     const id = `enemy_${this.nextId++}`;
-    const unit = new Unit(this.scene, tileX, tileY, id, 'enemy_unit', 'enemy', stats ?? ENEMY_COMBAT_STATS);
+    const enemyTextureKey = unitTypeId && this.scene.textures.exists(`unit_${unitTypeId}`) ? `unit_${unitTypeId}` : 'enemy_unit';
+    const unit = new Unit(this.scene, tileX, tileY, id, enemyTextureKey, 'enemy', stats ?? ENEMY_COMBAT_STATS);
     if (race) unit.sprite.setTint(getRaceTint(race));
     if (unitTypeId) unit.unitTypeId = unitTypeId;
     this.units.set(id, unit);
@@ -393,14 +400,17 @@ export class UnitManager {
 
   /**
    * Returns ability info for the first selected unit that has an ability.
+   * Returns `{ locked: true }` when the ability exists but hasn't been unlocked yet.
    * Used by the HUD to display the C-key ability status.
    */
-  getSelectedAbilityInfo(): { type: string; ready: boolean; active: boolean; cooldownSec: number } | null {
+  getSelectedAbilityInfo(): { type: string; ready: boolean; active: boolean; cooldownSec: number; locked?: boolean } | null {
     for (const u of this.selectedUnits) {
       if (!u.isAlive()) continue;
       // Hero units show their ability as the C-ability
       if (u.isHero) return this.getSelectedHeroAbilityInfo();
       if (u.unitTypeId === 'rifleman') {
+        if (!this.isAbilityUnlocked('unlock_overcharge'))
+          return { type: 'Overcharge', ready: false, active: false, cooldownSec: 0, locked: true };
         return {
           type: 'Overcharge',
           ready: u.canActivateOvercharge(),
@@ -409,6 +419,8 @@ export class UnitManager {
         };
       }
       if (u.unitTypeId === 'ironclad') {
+        if (!this.isAbilityUnlocked('unlock_shield_wall'))
+          return { type: 'Shield Wall', ready: false, active: false, cooldownSec: 0, locked: true };
         return {
           type: 'Shield Wall',
           ready: u.canActivateShieldWall(),
@@ -417,6 +429,8 @@ export class UnitManager {
         };
       }
       if (u.unitTypeId === 'phantom') {
+        if (!this.isAbilityUnlocked('unlock_shadow_clone'))
+          return { type: 'Shadow Clone', ready: false, active: false, cooldownSec: 0, locked: true };
         return {
           type: 'Shadow Clone',
           ready: u.canActivateShadowClone(),
@@ -540,10 +554,12 @@ export class UnitManager {
   }
 
   /** Returns R-ability info (Holy Nova) for the first selected Devotee. */
-  getSelectedRAbilityInfo(): { type: string; ready: boolean; active: boolean; cooldownSec: number } | null {
+  getSelectedRAbilityInfo(): { type: string; ready: boolean; active: boolean; cooldownSec: number; locked?: boolean } | null {
     for (const u of this.selectedUnits) {
       if (!u.isAlive()) continue;
       if (u.unitTypeId === 'devotee') {
+        if (!this.isAbilityUnlocked('unlock_holy_nova'))
+          return { type: 'Holy Nova', ready: false, active: false, cooldownSec: 0, locked: true };
         return {
           type: 'Holy Nova',
           ready: u.canActivateHolyNova(),
@@ -597,12 +613,15 @@ export class UnitManager {
 
   /**
    * Returns E-ability info for the first selected unit that has one.
+   * Returns `{ locked: true }` when the ability exists but hasn't been unlocked yet.
    * Used by the HUD to display the E-key ability status.
    */
-  getSelectedEAbilityInfo(): { type: string; ready: boolean; active: boolean; cooldownSec: number } | null {
+  getSelectedEAbilityInfo(): { type: string; ready: boolean; active: boolean; cooldownSec: number; locked?: boolean } | null {
     for (const u of this.selectedUnits) {
       if (!u.isAlive()) continue;
       if (u.unitTypeId === 'devotee') {
+        if (!this.isAbilityUnlocked('unlock_divine_pulse'))
+          return { type: 'Divine Pulse', ready: false, active: false, cooldownSec: 0, locked: true };
         return {
           type: 'Divine Pulse',
           ready: u.canActivateDivinePulse(),
@@ -611,6 +630,8 @@ export class UnitManager {
         };
       }
       if (u.unitTypeId === 'phantom') {
+        if (!this.isAbilityUnlocked('unlock_phase_shift'))
+          return { type: 'Phase Shift', ready: false, active: false, cooldownSec: 0, locked: true };
         return {
           type: 'Phase Shift',
           ready: u.canActivatePhaseShift(),

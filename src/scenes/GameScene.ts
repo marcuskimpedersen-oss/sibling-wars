@@ -18,7 +18,7 @@ import { EnemyAI } from '@/ai/EnemyAI';
 import { getBuildingsForRace, getRaceTint, getBuildingDefById } from '@/buildings/definitions';
 import {
   Race, GOLD_POSITIONS, JUICE_POSITIONS, BASE_TILE, ENEMY_BASE_TILE, RACES,
-  RACE_COMBAT_STATS, WORKER_COMBAT_STATS, RESOURCE_SNAP_RADIUS_TILES, TILE_SIZE, UNIT_SPEED, Difficulty, WinCondition, SURVIVAL_DURATION_MS,
+  RACE_COMBAT_STATS, RACE_UNIT_TYPES, WORKER_COMBAT_STATS, RESOURCE_SNAP_RADIUS_TILES, TILE_SIZE, UNIT_SPEED, Difficulty, WinCondition, SURVIVAL_DURATION_MS,
 } from '@/constants';
 import { CommandCard } from '@/ui/CommandCard';
 import { UnitPortraitPanel } from '@/ui/UnitPortraitPanel';
@@ -448,6 +448,10 @@ export class GameScene extends Phaser.Scene {
     const grid = this.mapManager.buildWalkabilityGrid();
     this.pathfinder = new PathfinderService(grid);
     this.buildingManager = new BuildingManager(this, this.pathfinder, this.resources);
+    this.buildingManager.isSupplyCapped = () => {
+      const cap = this.buildingManager.getTotalSupply() + this.bonusSupply;
+      return this.supplyUsed >= cap;
+    };
     this.buildingPlacement = new BuildingPlacement(this, this.buildingManager);
     this.unitManager = new UnitManager(this, this.resources, this.pathfinder);
     this.unitManager.playerRace = this.race;
@@ -735,6 +739,7 @@ export class GameScene extends Phaser.Scene {
 
     // ── Phantom stealth (B key) ───────────────────────────────────────────────
     this.events.on('input:activateStealth', () => {
+      if (!this.unitManager.isAbilityUnlocked('unlock_stealth')) return;
       this.unitManager.getSelectedPhantoms().forEach(p => {
         if (p.canStealth()) {
           p.activateStealth();
@@ -826,11 +831,17 @@ export class GameScene extends Phaser.Scene {
     this.events.on('input:retreat', () => {
       if (!this.playerHQ) return;
       const { x: hqX, y: hqY } = this.playerHQ.getWorldCenter();
+      const hqTileX = Math.floor(hqX / TILE_SIZE);
+      const hqTileY = Math.floor(hqY / TILE_SIZE);
       let count = 0;
       this.unitManager.getAllUnits().forEach(u => {
         if (u.isSelected && u.isAlive() && u.faction === 'player'
           && !u.isWorker && u.unitTypeId !== 'devotee') {
-          u.beginRetreat(hqX, hqY);
+          const fromTileX = Math.floor(u.getPosition().x / TILE_SIZE);
+          const fromTileY = Math.floor(u.getPosition().y / TILE_SIZE);
+          this.pathfinder.findPath(fromTileX, fromTileY, hqTileX, hqTileY, (path) => {
+            u.beginRetreat(hqX, hqY, path ?? undefined);
+          });
           count++;
         }
       });
@@ -978,6 +989,26 @@ export class GameScene extends Phaser.Scene {
       const juice = Math.max(1, Math.round(damage * 0.5));
       this.resources.addJuice(juice);
       this.spawnFloatingText(fromX, fromY - 20, `+${juice} 🜾`, '#cc44ff');
+    });
+
+    // ── Hero death: screen shake + white flash overlay ───────────────────────
+    this.events.on('unit:heroDied', (unit: import('@/units/Unit').Unit) => {
+      if (unit.faction === 'player') {
+        this.cameras.main.shake(350, 0.012);
+        // Full-screen white flash
+        const overlay = this.add.rectangle(
+          this.cameras.main.scrollX + this.cameras.main.width  / 2,
+          this.cameras.main.scrollY + this.cameras.main.height / 2,
+          this.cameras.main.width, this.cameras.main.height,
+          0xffffff, 0.45
+        ).setDepth(50).setScrollFactor(0);
+        this.tweens.add({
+          targets: overlay, alpha: 0, duration: 400, ease: 'Power2',
+          onComplete: () => overlay.destroy(),
+        });
+      } else {
+        this.cameras.main.shake(250, 0.008);
+      }
     });
 
     // ── Idle worker — select next on HUD button or F key ─────────────────────
@@ -1404,6 +1435,8 @@ export class GameScene extends Phaser.Scene {
         if (d.supplyProvided > 0) this._lastSupplyBuildingBuiltMs = this.gameElapsedMs;
         if (this.race === 'architects') {
           this.beginHuwConstruction(d, tx, ty);
+        } else if (this.race === 'unseen') {
+          this.beginUnseenConstruction(d, tx, ty);
         } else {
           const b = this.placeAndLinkBuilding(d, tx, ty);
           if (b) {
@@ -1411,18 +1444,7 @@ export class GameScene extends Phaser.Scene {
             this.lastPlayerActionMs = this.gameElapsedMs;
             const { x: bx, y: by } = b.getWorldCenter();
             this.events.emit('sound:buildingComplete', bx, by);
-            // Marcus (Unseen): builder sacrifices their life on completion
-            if (this.race === 'unseen') {
-              const workers = Array.from(this.unitManager.selectedUnits)
-                .filter(u => u.isWorker && u.isAlive());
-              workers.forEach(w => w.takeDamage(9999));
-              // Shade Spire: begin expanding dark zone
-              if (b.def.id === 'shade_spire') this.createShadeSpireZone(b);
-              // Void Gate: register portal
-              if (b.def.isVoidGate) this.registerVoidGate(b);
-            }
             // Finn (Bulwark): buildings have a construction delay before becoming active.
-            // Walls build faster (5s) than regular structures (10s).
             if (this.race === 'bulwark') {
               b.beginConstruction(d.isWall ? 5000 : 10000);
             }
@@ -1447,13 +1469,9 @@ export class GameScene extends Phaser.Scene {
       if (timer > 0) return `Respawn: ${Math.ceil(timer / 1000)}s`;
       return null;
     };
-    this.productionPanel.onUnitQueued = (unitDef) => {
-      if (!unitDef.isUpgrade) this.supplyUsed++;
+    this.productionPanel.onUnitQueued = (_unitDef) => {
+      // Supply is reserved only when the unit actually finishes production, not on queue
     };
-    // Reverse supply when a queued unit is cancelled from the queue panel
-    this.events.on('production:cancelled', (unitDef: import('@/buildings/definitions').ProducedUnitDef) => {
-      if (!unitDef.isUpgrade) this.supplyUsed = Math.max(0, this.supplyUsed - 1);
-    });
     this.productionPanel.onShrineActivated = (shrine) => {
       this.activateShrineAbility(shrine);
     };
@@ -1471,8 +1489,8 @@ export class GameScene extends Phaser.Scene {
       }
 
       if (building.faction === 'player' && !building.isDestroyed()) {
-        // Mine: garrison any selected workers, then show mine panel
-        if (building.def.id === 'mine') {
+        // Mine / Juice Collector: garrison any selected workers
+        if (building.def.id === 'mine' || building.def.id === 'juice_collector') {
           const workers = Array.from(this.unitManager.selectedUnits).filter(u => u.isWorker && u.isAlive());
           if (workers.length > 0) this.garrisonWorkersIntoMine(workers, building);
         }
@@ -1529,6 +1547,8 @@ export class GameScene extends Phaser.Scene {
 
     this.buildingManager.onUnitProduced = (unitDef, tileX, tileY, faction, building) => {
       if (faction === 'player') {
+        // Population increases when the unit actually finishes production
+        if (!unitDef.isUpgrade) this.supplyUsed++;
         // Log for replay
         if (!this._replayMode) this._replayEventLog.push({ t: this.gameElapsedMs, type: 'train', tileX, tileY, unitTypeId: unitDef.id });
         if (unitDef.isUpgrade) {
@@ -2207,21 +2227,21 @@ export class GameScene extends Phaser.Scene {
 
   private spawnInitialUnits(): void {
     const stats = RACE_COMBAT_STATS[this.race];
+    const typeId = RACE_UNIT_TYPES[this.race];
     if (this.isMultiplayer && this.mpPlayerIndex === 1) {
-      // Player 1 spawns near ENEMY_BASE_TILE (bottom-right of map)
       const ex = ENEMY_BASE_TILE.x;
       const ey = ENEMY_BASE_TILE.y;
-      this.unitManager.spawnUnit(ex - 2, ey - 1, stats);
-      this.unitManager.spawnUnit(ex - 3, ey - 1, stats);
-      this.unitManager.spawnUnit(ex - 2, ey + 1, stats);
-      this.unitManager.spawnUnit(ex - 3, ey + 1, stats);
+      this.unitManager.spawnUnit(ex - 2, ey - 1, stats, typeId);
+      this.unitManager.spawnUnit(ex - 3, ey - 1, stats, typeId);
+      this.unitManager.spawnUnit(ex - 2, ey + 1, stats, typeId);
+      this.unitManager.spawnUnit(ex - 3, ey + 1, stats, typeId);
       this.unitManager.spawnWorker(ex - 2, ey + 3);
       this.unitManager.spawnWorker(ex - 3, ey + 3);
     } else {
-      this.unitManager.spawnUnit(7, 4, stats);
-      this.unitManager.spawnUnit(8, 4, stats);
-      this.unitManager.spawnUnit(7, 6, stats);
-      this.unitManager.spawnUnit(8, 6, stats);
+      this.unitManager.spawnUnit(7, 4, stats, typeId);
+      this.unitManager.spawnUnit(8, 4, stats, typeId);
+      this.unitManager.spawnUnit(7, 6, stats, typeId);
+      this.unitManager.spawnUnit(8, 6, stats, typeId);
       this.unitManager.spawnWorker(5, 7);
       this.unitManager.spawnWorker(6, 7);
     }
@@ -2341,32 +2361,133 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  /** Marcus (Unseen): selected worker walks to site, building appears on arrival, worker dies. */
+  private beginUnseenConstruction(def: import('@/buildings/definitions').BuildingDef, tx: number, ty: number): void {
+    const worker = Array.from(this.unitManager.selectedUnits).find(u => u.isWorker && u.isAlive());
+    if (!worker) {
+      const { x: hx, y: hy } = this.playerHQ?.getWorldCenter() ?? { x: 400, y: 300 };
+      this.spawnFloatingText(hx, hy - 30, 'Select a worker first!', '#ff8844');
+      return;
+    }
+
+    if (!this.resources.spendGold(def.goldCost)) return;
+
+    const workerUnit = worker as WorkerUnit;
+    if (workerUnit.miningState !== 'idle') this.stopWorkerMining(workerUnit);
+
+    const worldX = (tx + def.tileWidth  / 2) * TILE_SIZE;
+    const worldY = (ty + def.tileHeight / 2) * TILE_SIZE;
+    const w = def.tileWidth  * TILE_SIZE;
+    const h = def.tileHeight * TILE_SIZE;
+
+    // Ghost outline so the player can see where the building will appear
+    const site = this.add.rectangle(worldX, worldY, w, h, 0xbb44ee, 0.15)
+      .setDepth(5).setStrokeStyle(2, 0xbb44ee, 0.7);
+    const label = this.add.text(worldX, worldY - h / 2 - 12, 'Travelling…', {
+      fontSize: '10px', color: '#cc88ff', stroke: '#000', strokeThickness: 2,
+    }).setOrigin(0.5).setDepth(6);
+
+    let done = false;
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      site.destroy();
+      label.destroy();
+      this.events.off('unit:died', onWorkerDied);
+    };
+
+    const onWorkerDied = (unit: import('@/units/Unit').Unit) => {
+      if (unit !== worker || done) return;
+      this.resources.addGold(def.goldCost); // refund if worker dies in transit
+      cleanup();
+    };
+    this.events.on('unit:died', onWorkerDied);
+
+    const { tileX, tileY } = worker.getCurrentTile();
+    this.pathfinder.findPath(tileX, tileY, tx, ty, (path) => {
+      if (!worker.isAlive() || !path || path.length === 0) {
+        if (worker.isAlive()) this.resources.addGold(def.goldCost);
+        cleanup();
+        return;
+      }
+      worker.setPath(path, () => {
+        done = true;
+        cleanup();
+        const built = this.placeAndLinkBuilding(def, tx, ty, true);
+        if (built) {
+          this.stats.buildingsBuilt++;
+          const { x: bx, y: by } = built.getWorldCenter();
+          this.events.emit('sound:buildingComplete', bx, by);
+          if (built.def.id === 'shade_spire') this.createShadeSpireZone(built);
+          if (built.def.isVoidGate) this.registerVoidGate(built);
+        }
+        // Sacrifice the worker on arrival
+        worker.takeDamage(9999);
+      });
+    });
+  }
+
   // ── Garrison ───────────────────────────────────────────────────────────────
 
   private garrisonWorkersIntoMine(workers: import('@/units/Unit').Unit[], mine: Building): void {
+    const { x: mineWorldX, y: mineWorldY } = mine.getWorldCenter();
+
+    const enterMine = (worker: import('@/units/Unit').Unit) => {
+      if (mine.isDestroyed() || !mine.garrisonWorker()) return;
+      worker.isGarrisoned = true;
+      worker.setSelected(false);
+      this.unitManager.selectedUnits.delete(worker);
+      // Suppress health bar / shadow immediately so nothing floats outside the mine
+      worker.hideForGarrison();
+      // Animate worker shrinking into mine centre
+      if (worker instanceof WorkerUnit) {
+        worker.animateEnterMine(mineWorldX, mineWorldY, () => {
+          worker.sprite.setVisible(false);
+          worker.sprite.setAlpha(1).setScale(1);
+        });
+      }
+      const list = this.garrisonedWorkers.get(mine.id) ?? [];
+      list.push(worker);
+      this.garrisonedWorkers.set(mine.id, list);
+    };
+
     workers.forEach(worker => {
-      // Cancel any active mining loop before garrisoning
       if (worker instanceof WorkerUnit && worker.miningState !== 'idle') {
         this.stopWorkerMining(worker);
       }
       const { tileX, tileY } = worker.getCurrentTile();
-      this.pathfinder.findPath(tileX, tileY, mine.tileX + 1, mine.tileY + 1, (path) => {
-        if (!worker.isAlive() || mine.isDestroyed() || !path || path.length === 0) return;
-        worker.setPath(path, () => {
-          // Mine may have been destroyed while the worker was walking to it
-          if (mine.isDestroyed()) return;
-          if (mine.garrisonWorker()) {
-            worker.isGarrisoned = true;
-            worker.setSelected(false);
-            this.unitManager.selectedUnits.delete(worker);
-            worker.sprite.setVisible(false);
-            // Store reference so we can eject later
-            const list = this.garrisonedWorkers.get(mine.id) ?? [];
-            list.push(worker);
-            this.garrisonedWorkers.set(mine.id, list);
-          }
+
+      // Tiles adjacent to the mine footprint, sorted nearest-first
+      const adj: { x: number; y: number }[] = [];
+      for (let dx = 0; dx < mine.def.tileWidth; dx++) {
+        adj.push({ x: mine.tileX + dx, y: mine.tileY - 1 });
+        adj.push({ x: mine.tileX + dx, y: mine.tileY + mine.def.tileHeight });
+      }
+      for (let dy = 0; dy < mine.def.tileHeight; dy++) {
+        adj.push({ x: mine.tileX - 1,                 y: mine.tileY + dy });
+        adj.push({ x: mine.tileX + mine.def.tileWidth, y: mine.tileY + dy });
+      }
+      adj.sort((a, b) =>
+        (Math.abs(a.x - tileX) + Math.abs(a.y - tileY)) -
+        (Math.abs(b.x - tileX) + Math.abs(b.y - tileY))
+      );
+
+      // Already adjacent — enter immediately
+      if (adj.some(d => d.x === tileX && d.y === tileY)) {
+        enterMine(worker);
+        return;
+      }
+
+      // Path to nearest reachable adjacent tile; first result wins
+      let resolved = false;
+      for (const dest of adj) {
+        this.pathfinder.findPath(tileX, tileY, dest.x, dest.y, (path) => {
+          if (resolved || !worker.isAlive() || mine.isDestroyed() || !path || path.length === 0) return;
+          resolved = true;
+          worker.setPath(path, () => enterMine(worker));
         });
-      });
+      }
     });
   }
 
@@ -2374,11 +2495,10 @@ export class GameScene extends Phaser.Scene {
     const workers = this.garrisonedWorkers.get(mine.id) ?? [];
     workers.forEach((worker, i) => {
       worker.isGarrisoned = false;
-      // Scatter them around the mine exit
-      const exitX = (mine.tileX + mine.def.tileWidth + 1 + (i % 3)) * 32 + 16;
-      const exitY = (mine.tileY + mine.def.tileHeight + Math.floor(i / 3)) * 32 + 16;
+      const exitX = (mine.tileX + mine.def.tileWidth + 1 + (i % 3)) * TILE_SIZE + TILE_SIZE / 2;
+      const exitY = (mine.tileY + mine.def.tileHeight + Math.floor(i / 3)) * TILE_SIZE + TILE_SIZE / 2;
       worker.sprite.setPosition(exitX, exitY);
-      worker.sprite.setVisible(true);
+      worker.showAfterGarrison();
     });
     this.garrisonedWorkers.delete(mine.id);
     mine.ejectAllWorkers();
@@ -2514,6 +2634,25 @@ export class GameScene extends Phaser.Scene {
   private applyUpgrade(upgradeId: string): void {
     if (this.purchasedUpgrades.has(upgradeId)) return; // duplicate queue entry check
     this.purchasedUpgrades.add(upgradeId);
+
+    // Ability unlock upgrades
+    if (upgradeId.startsWith('unlock_')) {
+      this.unitManager.unlockAbility(upgradeId);
+      const { x, y } = this.playerHQ?.getWorldCenter() ?? { x: 400, y: 300 };
+      this.events.emit('sound:upgradeComplete', x, y);
+      const abilityLabels: Record<string, string> = {
+        unlock_overcharge:   '⚡ Overcharge unlocked',
+        unlock_shield_wall:  '🛡 Shield Wall unlocked',
+        unlock_stealth:      '👁 Stealth unlocked',
+        unlock_shadow_clone: '✦ Shadow Clone unlocked',
+        unlock_phase_shift:  '◈ Phase Shift unlocked',
+        unlock_divine_pulse: '✦ Divine Pulse unlocked',
+        unlock_holy_nova:    '✦ Holy Nova unlocked',
+      };
+      this.spawnFloatingText(x, y - 40, abilityLabels[upgradeId] ?? '✦ Ability unlocked', '#aaddff');
+      return;
+    }
+
     const isAttack = upgradeId.includes('attack');
     if (isAttack) {
       this.unitManager.attackBonus += 3;
@@ -2698,31 +2837,23 @@ export class GameScene extends Phaser.Scene {
    * Each worker walks to the node, harvests, carries back to HQ, deposits, and repeats.
    */
   private assignWorkersToNode(workers: WorkerUnit[], node: ResourceNode): void {
-    if (!this.playerHQ) return;
-    const hqCenter = this.playerHQ.getWorldCenter();
-    const hqTileX = Math.floor(hqCenter.x / TILE_SIZE);
-    const hqTileY = Math.floor(hqCenter.y / TILE_SIZE);
-
-    // Direct mining (no linked building) = 2\u00d7 harvest time
-    const hasLinkedBuilding = this.buildingManager.getBuildings()
-      .some(b => b.faction === 'player' && b.getLinkedNode() === node);
-
-    for (const worker of workers) {
-      if (!worker.isAlive() || worker.isGarrisoned) continue;
-      if (node.isSaturated()) {
-        this.spawnFloatingText(worker.sprite.x, worker.sprite.y - 26, 'Node full', '#ff8844');
-        break;
-      }
-      // Cancel any existing assignment
-      if (worker.miningState !== 'idle') this.stopWorkerMining(worker);
-
-      if (!node.addWorker()) continue; // double-check saturation
-      this.miningAssignments.set(worker.id, node);
-      worker.directMining = !hasLinkedBuilding;
-      worker.startMining(node, hqTileX, hqTileY);
-      this.pathWorkerToNode(worker, node);
-      const label = hasLinkedBuilding ? '\u26cf Mining' : '\u26cf Direct';
-      this.spawnFloatingText(worker.sprite.x, worker.sprite.y - 26, label, node.type === 'gold' ? '#ffd700' : '#cc88ff');
+    // Find a mine/juice building linked to this node, or any within 3 tiles
+    const buildings = this.buildingManager.getBuildings();
+    let linkedMine = buildings.find(b =>
+      b.faction === 'player' && !b.isDestroyed() && b.getLinkedNode() === node && b.def.resourceType != null
+    );
+    if (!linkedMine) {
+      linkedMine = buildings.find(b =>
+        b.faction === 'player' && !b.isDestroyed() && b.def.resourceType != null &&
+        Math.abs(b.tileX - node.tileX) <= 3 && Math.abs(b.tileY - node.tileY) <= 3
+      );
+    }
+    if (linkedMine) {
+      this.garrisonWorkersIntoMine(workers, linkedMine);
+    } else {
+      workers.forEach(w => {
+        this.spawnFloatingText(w.sprite.x, w.sprite.y - 26, 'Build a mine first', '#ff8844');
+      });
     }
   }
 
@@ -2884,40 +3015,31 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
-  /**
-   * Send a freshly trained worker to the building's rally point and, on arrival,
-   * auto-assign it to the nearest non-saturated player-side gold node.
-   * If no rally is set, the auto-assign fires immediately.
-   */
+  /** Send a freshly trained worker to the building's rally point; garrison into a mine if the rally is set on one. */
   private sendWorkerToRallyThenAutoAssign(
     worker: import('@/units/WorkerUnit').WorkerUnit,
     building: import('@/buildings/Building').Building
   ): void {
-    const onArrived = () => {
-      if (!worker.isAlive() || worker.miningState !== 'idle') return;
-      const node = this.findNearestAvailableNodeForWorker(worker);
-      if (!node || !this.playerHQ) return;
-      const hqCenter = this.playerHQ.getWorldCenter();
-      const hqTileX  = Math.floor(hqCenter.x / TILE_SIZE);
-      const hqTileY  = Math.floor(hqCenter.y / TILE_SIZE);
-      if (!node.addWorker()) return; // race-safe guard
-      const hasLinkedBuilding = this.buildingManager.getBuildings()
-        .some(b => b.faction === 'player' && b.getLinkedNode() === node);
-      this.miningAssignments.set(worker.id, node);
-      worker.directMining = !hasLinkedBuilding;
-      worker.startMining(node, hqTileX, hqTileY);
-      this.pathWorkerToNode(worker, node);
-      this.spawnFloatingText(worker.sprite.x, worker.sprite.y - 26, '⛏ Mining', '#ffd700');
-    };
-
     const rally = building.getRallyTile();
-    if (!rally) { onArrived(); return; }
+    if (!rally) return;
+
+    // Check if the rally tile is inside or adjacent to a mine / juice collector
+    const mine = this.buildingManager.getBuildings().find(b =>
+      b.faction === 'player' && !b.isDestroyed() &&
+      (b.def.id === 'mine' || b.def.id === 'juice_collector') &&
+      rally.tileX >= b.tileX - 1 && rally.tileX <= b.tileX + b.def.tileWidth &&
+      rally.tileY >= b.tileY - 1 && rally.tileY <= b.tileY + b.def.tileHeight
+    );
+
+    if (mine) {
+      this.garrisonWorkersIntoMine([worker], mine);
+      return;
+    }
 
     const { tileX, tileY } = worker.getCurrentTile();
     this.pathfinder.findPath(tileX, tileY, rally.tileX, rally.tileY, (path) => {
-      if (!worker.isAlive()) return;
-      if (!path || path.length === 0) { onArrived(); return; }
-      worker.setPath(path, onArrived);
+      if (!worker.isAlive() || !path || path.length === 0) return;
+      worker.setPath(path);
     });
   }
 
@@ -5514,6 +5636,7 @@ export class GameScene extends Phaser.Scene {
         eAbilityInfo:   this.unitManager.getSelectedEAbilityInfo(),
         rAbilityInfo:   this.unitManager.getSelectedRAbilityInfo(),
         hasBAbility:    this.race === 'unseen' && this.unitManager.getSelectedPhantoms().length > 0,
+        bAbilityLocked: !this.unitManager.isAbilityUnlocked('unlock_stealth'),
         hasSiegeCrawler: siegeCrawlers.length > 0,
         siegeActive:    siegeCrawlers.some(u => u.siegeModeActive),
       });

@@ -91,6 +91,13 @@ export class Building {
   onUnitProduced: ((unitDef: ProducedUnitDef, spawnTileX: number, spawnTileY: number) => void) | null = null;
   onDestroyed: (() => void) | null = null;
   onCollectionTick: ((amount: number, worldX: number, worldY: number) => void) | null = null;
+  /** Injected by GameScene — returns true when population is at cap (pauses unit production). */
+  isSupplyCapped: (() => boolean) | null = null;
+
+  private _supplyCappedLabel: Phaser.GameObjects.Text | null = null;
+
+  /** True once the 2-second placement animation has finished. Supply is only counted after this. */
+  isBuilt: boolean = false;
 
   constructor(scene: Phaser.Scene, def: BuildingDef, tileX: number, tileY: number, id: string, faction: Faction = 'player') {
     this.faction = faction;
@@ -196,6 +203,8 @@ export class Building {
     // Construction placement animation (all non-HQ buildings)
     if (!def.isHQ) {
       this.startPlacementAnimation();
+    } else {
+      this.isBuilt = true;
     }
 
     // Pylon power-field ring (Architects Pylon + HQ)
@@ -315,10 +324,27 @@ export class Building {
     }
 
     if (current.elapsed >= current.unitDef.productionMs) {
+      // Pause at 100% if population is at cap (non-upgrade units only)
+      if (!current.unitDef.isUpgrade && this.isSupplyCapped?.()) {
+        current.elapsed = current.unitDef.productionMs; // clamp — don't overshoot
+        if (!this._supplyCappedLabel) {
+          const { x, y } = this.getWorldCenter();
+          this._supplyCappedLabel = this.scene.add.text(x, y - this.def.tileHeight * TILE_SIZE / 2 - 22, '⚠ Pop cap!', {
+            fontSize: '10px', color: '#ff8844', stroke: '#000', strokeThickness: 3,
+          }).setOrigin(0.5).setDepth(13);
+        }
+        return;
+      }
+
+      // Clear cap label if it was showing
+      if (this._supplyCappedLabel) {
+        this._supplyCappedLabel.destroy();
+        this._supplyCappedLabel = null;
+      }
+
       this.productionQueue.shift();
       const spawnTileX = this.tileX + Math.floor(this.def.tileWidth / 2);
       const spawnTileY = this.tileY + this.def.tileHeight + 1;
-      // Green check flash above building when training completes
       const { x: bx, y: by } = this.getWorldCenter();
       this.scene.events.emit('sound:buildingComplete', bx, by);
       this.onUnitProduced?.(current.unitDef, spawnTileX, spawnTileY);
@@ -461,6 +487,8 @@ export class Building {
       this.rallyMarker = null;
       this.passiveLabelObj?.destroy();
       this.passiveLabelObj = null;
+      this._supplyCappedLabel?.destroy();
+      this._supplyCappedLabel = null;
       // Clean up any in-progress construction visuals
       if (this.constructionSite) { this.constructionSite.destroy(); this.constructionSite = null; }
       if (this.constructionBar) { this.constructionBar.destroy(); this.constructionBar = null; }
@@ -623,7 +651,7 @@ export class Building {
     const barBg  = this.scene.add.rectangle(x, y + h / 2 + 14, w, 4, 0x333333).setDepth(14);
     const barFill = this.scene.add.rectangle(x - w / 2, y + h / 2 + 14, 0, 4, 0x44ff88).setOrigin(0, 0.5).setDepth(15);
     this.scene.tweens.add({ targets: barFill, width: w, duration: ANIM_MS, ease: 'Linear' });
-    this.scene.time.delayedCall(ANIM_MS + 50, () => { barBg.destroy(); barFill.destroy(); });
+    this.scene.time.delayedCall(ANIM_MS + 50, () => { barBg.destroy(); barFill.destroy(); this.isBuilt = true; });
   }
 
   // ── Finn construction delay ───────────────────────────────────────────────
